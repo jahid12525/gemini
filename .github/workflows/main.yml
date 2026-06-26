@@ -70,8 +70,12 @@ jobs:
 
           chromium.use(StealthPlugin());
           const app = express();
+          
+          // multer ডিরেক্ট টেক্সট ফিল্ডও এক্সপ্রেস বডিতে পুশ করবে
           const upload = multer({ dest: os.tmpdir() });
+          
           app.use(express.json());
+          app.use(express.urlencoded({ extended: true }));
 
           const PORT = 8080;
           let context, page;
@@ -104,19 +108,26 @@ jobs:
             }
           }
 
-          app.post('/api/gemini', upload.single('image'), async (req, res) => {
+          // upload.any() ব্যবহার করা হয়েছে যেন ইমেজ থাকুক বা না থাকুক, প্রম্পট টেক্সট সবসময় রিড হয়
+          app.post('/api/gemini', upload.any(), async (req, res) => {
             if (!page) return res.status(500).json({ success: false, error: 'Browser stack not ready' });
             
+            // পাইথন থেকে পাঠানো ফর্ম-ডাটা এবং জেসন ডাটা দুইটাই চেক করবে
             const promptText = req.body.prompt;
-            const file = req.file;
-            if (!promptText) return res.status(400).json({ error: 'Prompt is required' });
+            
+            if (!promptText) {
+              console.log("❌ [API] Missing prompt in request body");
+              return res.status(400).json({ error: 'Prompt is required' });
+            }
 
             try {
-              console.log(`🤖 [API] New Request received.`);
+              console.log(`🤖 [API] New Request received. Prompt: ${promptText.substring(0, 30)}...`);
               await page.goto('https://gemini.google.com/app/new', { waitUntil: 'domcontentloaded' });
               try { await page.keyboard.press('Escape'); } catch(_) {}
 
-              if (file) {
+              // ইমেজ ফাইল হ্যান্ডলিং লজিক
+              if (req.files && req.files.length > 0) {
+                const file = req.files[0];
                 const inputFiles = await page.waitForSelector('input[type="file"]');
                 await inputFiles.setInputFiles(file.path);
                 fs.unlinkSync(file.path);
@@ -131,7 +142,7 @@ jobs:
               const responseSel = 'div[id^="model-response-message-content"], message-content, .message-content-inner';
               await page.waitForSelector(responseSel);
 
-              // HTTP স্ট্রিমিং রেসপন্স হেডার সেটআপ
+              // রিয়েল-টাইম SSE স্ট্রিমিং হেডার্স
               res.setHeader('Content-Type', 'text/event-stream');
               res.setHeader('Cache-Control', 'no-cache');
               res.setHeader('Connection', 'keep-alive');
@@ -139,9 +150,8 @@ jobs:
               let lastSentText = "";
               let noChangeCounter = 0;
 
-              // মিউটেশন বা পোলিং এর মাধ্যমে ডমের লাইভ ক্যারেক্টার ট্র্যাক লুপ (জিরো এক্সট্রা ডিলে)
               while (true) {
-                await new Promise(r => setTimeout(r, 200)); // ২০০ মিলি-সেকেন্ড পর পর ডম থেকে নতুন ক্যারেক্টার পিক করবে
+                await new Promise(r => setTimeout(r, 200)); 
                 
                 const currentFullText = await page.evaluate((selector) => {
                   const el = document.querySelector(selector);
@@ -149,7 +159,6 @@ jobs:
                 }, responseSel);
 
                 if (currentFullText.length > lastSentText.length) {
-                  // শুধুমাত্র নতুন অংশটুকু (শব্দ বা ক্যারেক্টার) কেটে ক্লায়েন্টকে লাইভ পাঠানো হচ্ছে
                   const newChunk = currentFullText.substring(lastSentText.length);
                   res.write(newChunk);
                   lastSentText = currentFullText;
@@ -157,7 +166,6 @@ jobs:
                 } else if (currentFullText.length > 0 && currentFullText.length === lastSentText.length) {
                   noChangeCounter++;
                   
-                  // জেমিনির জেনারেশন শেষ কিনা তা যাচাই করার কন্ডিশন
                   const isFinished = await page.evaluate((selector) => {
                     const el = document.querySelector(selector);
                     if (!el) return true;
@@ -170,7 +178,7 @@ jobs:
                 }
               }
 
-              res.end(); // স্ট্রিমিং শেষ
+              res.end(); 
               console.log(`✅ [API] Realtime Stream Complete!`);
             } catch (err) {
               console.error(`❌ [API ERROR]`, err.message);
@@ -195,7 +203,13 @@ jobs:
         run: |
           echo "🔗 Connecting LocalTunnel Gateway..."
           sudo npm install -g localtunnel
-          lt --port 8080 --subdomain ruslan-gemini-api &
+          
+          # অটো-রিস্টার্ট লুপ সহ লোকালটানেল রান করা হচ্ছে যেন ড্রপ করলে নিজে নিজেই কানেক্ট করে
+          until lt --port 8080 --subdomain ruslan-gemini-api; do
+            echo "🔄 LocalTunnel crashed or slot busy! Reconnecting in 3 seconds..."
+            sleep 3
+          done &
+          
           sleep 18000
 
       - name: 🎥 Upload Live Screen Recording & Debug Assets
