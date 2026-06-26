@@ -1,62 +1,4 @@
-name: 🚀 Gemini Persistent Profile API Gateway
-
-on:
-  workflow_dispatch: # cron-job.org বা এক্সটার্নাল সার্ভিস থেকে সরাসরি এপিআই দিয়ে রান করার জন্য
-
-jobs:
-  run-api-gateway:
-    name: 🌐 Launch Persistent API + LocalTunnel
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: 📦 Checkout Repository Code
-        uses: actions/checkout@v4
-
-      - name: 📦 Setup Node.js Environment
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: 📥 Install System & Node Dependencies
-        run: |
-          npm init -y
-          npm install express playwright playwright-extra puppeteer-extra-plugin-stealth localtunnel multer
-          npx playwright install chrome --with-deps
-
-      - name: 🖥️ Start Virtual Display (Xvfb)
-        run: |
-          sudo apt-get install -y xvfb
-          Xvfb :99 -screen 0 1920x1080x24 &
-          sleep 2
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-
-      - name: 📂 Download & Extract Google Profile Securely
-        env:
-          DOWNLOAD_URL: ${{ secrets.PROFILE_DOWNLOAD_URL }}
-        run: |
-          if [ -z "$DOWNLOAD_URL" ]; then
-            echo "❌ Error: PROFILE_DOWNLOAD_URL secret is missing!"
-            exit 1
-          fi
-          
-          echo "📥 Downloading profile from secure cloud link..."
-          wget -q -O gemini_profile.zip "$DOWNLOAD_URL"
-          
-          if [ -s "gemini_profile.zip" ]; then
-            unzip -q gemini_profile.zip -d ./
-            echo "🧹 Cleaning Windows specific lock files from profile..."
-            rm -f ./gemini_profile/SingletonLock
-            rm -f ./gemini_profile/Lock
-            rm -f ./gemini_profile/Google\ Profile\ Lock
-            rm -rf ./gemini_profile/Default/Cache/*
-            rm -f gemini_profile.zip
-            echo "✅ Secure Profile directory is ready!"
-          else
-            echo "❌ Error: Failed to download gemini_profile.zip!"
-            exit 1
-          fi
-
-      - name: 🛠️ Create & Start API Gateway Server
+- name: 🛠️ Create & Start API Gateway Server
         run: |
           mkdir -p /tmp/gemini-recordings
 
@@ -131,26 +73,30 @@ jobs:
               await page.goto('https://gemini.google.com/app/new', { waitUntil: 'domcontentloaded' });
               try { await page.keyboard.press('Escape'); } catch(_) {}
 
+              // ইমেজ থাকলে শুধুমাত্র এখানে সেফটি বাফার কাজ করবে যেন ৪MD বা বড় ইমেজ ড্রপ না হয়
               if (file) {
-                console.log(`📎 [API] Attaching Image...`);
-                const inputFiles = await page.waitForSelector('input[type="file"]');
+                console.log(`📎 [API] Attaching Image Asset to Gemini...`);
+                const inputFiles = await page.waitForSelector('input[type="file"]', { timeout: 10000 });
                 await inputFiles.setInputFiles(file.path);
+                // জেমিনি ইন্টারফেসে ইমেজটি আপলোড হয়ে স্ট্যাবল হওয়ার জন্য ৩ সেকেন্ডের রিয়েল সেফটি ওয়েট
+                await new Promise(r => setTimeout(r, 3000));
                 fs.unlinkSync(file.path);
               }
 
               const inputSel = 'div.ql-editor[contenteditable="true"], div[role="textbox"], textarea';
-              await page.waitForSelector(inputSel);
+              await page.waitForSelector(inputSel, { timeout: 10000 });
               await page.click(inputSel, { force: true });
               await page.keyboard.insertText(promptText);
               await page.keyboard.press('Enter');
-              console.log(`📡 [API] Prompt submitted. Scraping response...`);
+              console.log(`📡 [API] Prompt submitted. Scraping response chunks...`);
 
               let responseText = '';
               let lastLength = 0;
               let checkCount = 0;
               
+              // ইমেজ প্রসেসিংয়ের জন্য এই লুপে ১.৫ সেকেন্ডের বদলে ২.৫ সেকেন্ড ইন্টারভাল দেওয়া হলো
               while (true) {
-                await new Promise(r => setTimeout(r, 1500)); 
+                await new Promise(r => setTimeout(r, 2500)); 
                 
                 responseText = await page.evaluate(() => {
                   const el = document.querySelector('div[id^="model-response-message-content"], message-content, .message-content-inner');
@@ -159,7 +105,7 @@ jobs:
 
                 if (responseText.length > 0 && responseText.length === lastLength) {
                   checkCount++;
-                  if (checkCount >= 2) break;
+                  if (checkCount >= 2) break; // রেসপন্স কমপ্লিট ও স্ট্যাবল হলে ব্রেক
                 } else {
                   checkCount = 0;
                   if (responseText.length > 0) {
@@ -184,21 +130,3 @@ jobs:
 
           node server.mjs &
           sleep 5
-
-      - name: 🔗 Bind & Expose via LocalTunnel Gateway
-        run: |
-          echo "🔗 Connecting LocalTunnel Gateway..."
-          sudo npm install -g localtunnel
-          
-          lt --port 8080 --subdomain ruslan-gemini-api &
-          
-          echo "⏰ Active Shift Started. Listening for API cURL calls..."
-          sleep 18000
-
-      - name: 🎥 Upload Live Screen Recording & Debug Assets
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gemini-live-recording
-          path: /tmp/gemini-recordings/
-          retention-days: 3
