@@ -1,0 +1,160 @@
+name: 🚀 Gemini Persistent Profile API Gateway
+
+on:
+  workflow_dispatch: # ম্যানুয়ালি গিটহাব ড্যাশবোর্ড থেকে রান করার জন্য
+  schedule:
+    - cron: '0 */5 * * *' # প্রতি ৫ ঘণ্টা পর পর অটোমেটিক রান হওয়ার জন্য (২৪ ঘণ্টা সচল রাখতে)
+
+jobs:
+  run-api-gateway:
+    name: 🌐 Launch Persistent API + LocalTunnel
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📦 Checkout Repository Code
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js Environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 📥 Install System & Node Dependencies
+        run: |
+          npm init -y
+          npm install express playwright-extra puppeteer-extra-plugin-stealth localtunnel multer
+          # প্লে-রাইটের জন্য অফিসিয়াল ক্রোম ব্রাউজার এবং লিনাক্স ডিপেন্ডেন্সি ইনস্টল
+          npx playwright install chrome --with-deps
+
+      - name: 🖥️ Start Virtual Display (Xvfb)
+        run: |
+          sudo apt-get install -y xvfb
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+          echo "✅ Xvfb virtual display started on env :99"
+
+      - name: 📂 Extract Persistent Google Profile
+        run: |
+          # রিপোজিটরিতে পুশ করা gemini_profile.zip ফাইলটি রানারের রুটে আনজিপ করা হচ্ছে
+          if [ -f "gemini_profile.zip" ]; then
+            unzip -q gemini_profile.zip -d ./
+            echo "✅ Persistent Google Profile Extracted Successfully!"
+            ls -la ./gemini_profile
+          else
+            echo "❌ Error: gemini_profile.zip not found in repository root!"
+            exit 1
+          fi
+
+      - name: 🛠️ Create & Start API Gateway Server
+        run: |
+          cat > server.mjs << 'SERVER_EOF'
+          import express from 'express';
+          import multer from 'multer';
+          import { chromium } from 'playwright-extra';
+          import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+          import fs from 'fs';
+          import os from 'os';
+
+          chromium.use(StealthPlugin());
+          const app = express();
+          const upload = multer({ dest: os.tmpdir() });
+          app.use(express.json());
+
+          const PORT = 8080;
+          let context, page;
+
+          async function initGemini() {
+            console.log("🌐 Launching Chromium with Persistent Context...");
+            
+            // আনজিপ হওয়া 'gemini_profile' ফোল্ডার এবং রিয়েল ক্রোম চ্যানেল দিয়ে লঞ্চ
+            context = await chromium.launchPersistentContext('./gemini_profile', {
+              headless: false, // Xvfb ব্যাকগ্রাউন্ডে রান হবে তাই false রাখা বাধ্যতামূলক
+              channel: 'chrome',
+              args: [
+                '--no-sandbox', 
+                '--disable-setuid-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-web-security'
+              ],
+              viewport: { width: 1280, height: 800 }
+            });
+
+            page = await context.newPage();
+            
+            console.log("🔐 Checking Gemini Live Session Status...");
+            await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 50000 });
+            await new Promise(r => setTimeout(r, 5000));
+            
+            console.log(`Current Connected URL: ${page.url()}`);
+            console.log("✅ Gemini Persistent Browser Stack Ready!");
+          }
+
+          // API Endpoint for cURL Requests
+          app.post('/api/gemini', upload.single('image'), async (req, res) => {
+            const promptText = req.body.prompt;
+            const file = req.file;
+
+            if (!promptText) return res.status(400).json({ error: 'Prompt is required' });
+
+            try {
+              console.log(`🤖 Request Received: ${promptText}`);
+              await page.goto('https://gemini.google.com/app/new', { waitUntil: 'domcontentloaded' });
+              await new Promise(r => setTimeout(r, 2000));
+              try { await page.keyboard.press('Escape'); } catch(_) {}
+
+              // Handle Image Attachment if sent via cURL -F
+              if (file) {
+                console.log(`📎 Uploading Image Asset to Gemini input...`);
+                const inputFiles = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+                await inputFiles.setInputFiles(file.path);
+                await new Promise(r => setTimeout(r, 2000));
+                fs.unlinkSync(file.path);
+              }
+
+              // Submit Prompt
+              const inputSel = 'div.ql-editor[contenteditable="true"]';
+              await page.click(inputSel, { force: true });
+              await page.keyboard.insertText(promptText);
+              await page.keyboard.press('Enter');
+
+              // Wait for response chunk to finish streaming
+              let responseText = '';
+              const deadline = Date.now() + 75000;
+              while (Date.now() < deadline) {
+                await new Promise(r => setTimeout(r, 2500));
+                responseText = await page.evaluate(() => {
+                  const el = document.querySelector('div[id^="model-response-message-content"], message-content');
+                  return el ? el.innerText.trim() : '';
+                });
+                if (responseText && !responseText.includes('...')) break;
+              }
+
+              res.json({ success: true, response: responseText });
+            } catch (err) {
+              res.status(500).json({ success: false, error: err.message });
+            }
+          });
+
+          app.listen(PORT, async () => {
+            console.log(`🚀 API Internal Server running on port ${PORT}`);
+            await initGemini();
+          });
+          SERVER_EOF
+
+          // Express সার্ভার ব্যাকগ্রাউন্ডে স্টার্ট করা হলো
+          node server.mjs &
+          sleep 8
+
+      - name: 🔗 Bind & Expose via LocalTunnel Gateway
+        run: |
+          echo "🔗 Connecting LocalTunnel Gateway..."
+          sudo npm install -g localtunnel
+          
+          # ৫টি আলাদা গিটহাব অ্যাকাউন্টেই সাবডোমেনের নামটি হুবহু এক রাখবেন (যেমন: ruslan-gemini-api)
+          lt --port 8080 --subdomain ruslan-gemini-api &
+          
+          # ৫ ঘণ্টা (১৮০০০ সেকেন্ড) গিটহাব রানার ও সেশন সচল রাখার লুপ
+          echo "⏰ Active Shift Started. Listening for API cURL calls..."
+          sleep 18000
+          echo "🛑 Shift ended. Transferring gateway pointer to next account."
