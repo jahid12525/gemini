@@ -42,7 +42,6 @@ jobs:
           fi
           
           echo "📥 Downloading profile from secure cloud link..."
-          # Dropbox থেকে ডিরেক্ট রানারে জিপ ফাইলটি নামানো হচ্ছে
           wget -q -O gemini_profile.zip "$DOWNLOAD_URL"
           
           if [ -s "gemini_profile.zip" ]; then
@@ -55,7 +54,7 @@ jobs:
             rm -f gemini_profile.zip
             echo "✅ Secure Profile directory is ready!"
           else
-            echo "❌ Error: Failed to download gemini_profile.zip (File is empty)!"
+            echo "❌ Error: Failed to download gemini_profile.zip!"
             exit 1
           fi
 
@@ -102,16 +101,13 @@ jobs:
               page = await context.newPage();
               
               console.log("⚡ [CONSOLE UPDATE] Navigating to https://gemini.google.com/app...");
-              await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 60000 });
-              
-              console.log("⚡ [CONSOLE UPDATE] Waiting 5 seconds for session restoration and cookies verification...");
-              await new Promise(r => setTimeout(r, 5000));
+              await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded' });
               
               const currentUrl = page.url();
               console.log(`📡 [CONSOLE UPDATE] Current Active Browser URL: ${currentUrl}`);
               
               if(currentUrl.includes('accounts.google.com')) {
-                console.error("❌ [SECURITY ALERT] Google rejected persistent context! Redirected to Login Page.");
+                console.error("❌ [SECURITY ALERT] Google rejected persistent context!");
                 await page.screenshot({ path: '/tmp/gemini-recordings/auth_failed_screenshot.png' });
               } else {
                 console.log("✅ [CONSOLE UPDATE] Gemini Persistent Browser Stack Ready & Verified!");
@@ -124,7 +120,7 @@ jobs:
           }
 
           app.post('/api/gemini', upload.single('image'), async (req, res) => {
-            if (!page) return res.status(500).json({ success: false, error: 'Browser stack not ready or crashed' });
+            if (!page) return res.status(500).json({ success: false, error: 'Browser stack not ready' });
             
             const promptText = req.body.prompt;
             const file = req.file;
@@ -132,37 +128,49 @@ jobs:
             if (!promptText) return res.status(400).json({ error: 'Prompt is required' });
 
             try {
-              console.log(`🤖 Request Received: ${promptText}`);
+              console.log(`🤖 [API] Request Received: ${promptText}`);
+              
               await page.goto('https://gemini.google.com/app/new', { waitUntil: 'domcontentloaded' });
-              await new Promise(r => setTimeout(r, 2000));
               try { await page.keyboard.press('Escape'); } catch(_) {}
 
               if (file) {
-                console.log(`📎 [API CALL] Attaching Image Multi-part stream...`);
-                const inputFiles = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+                console.log(`📎 [API] Attaching Image...`);
+                const inputFiles = await page.waitForSelector('input[type="file"]');
                 await inputFiles.setInputFiles(file.path);
-                await new Promise(r => setTimeout(r, 2000));
                 fs.unlinkSync(file.path);
               }
 
-              const inputSel = 'div.ql-editor[contenteditable="true"]';
+              const inputSel = 'div.ql-editor[contenteditable="true"], div[role="textbox"], textarea';
+              await page.waitForSelector(inputSel);
               await page.click(inputSel, { force: true });
               await page.keyboard.insertText(promptText);
               await page.keyboard.press('Enter');
-              console.log(`📡 [API CALL] Prompt submitted. Waiting for streaming tokens...`);
+              console.log(`📡 [API] Prompt submitted. Scraping response...`);
 
               let responseText = '';
-              const deadline = Date.now() + 75000;
-              while (Date.now() < deadline) {
-                await new Promise(r => setTimeout(r, 2500));
+              let lastLength = 0;
+              let checkCount = 0;
+              
+              while (true) {
+                await new Promise(r => setTimeout(r, 1500)); 
+                
                 responseText = await page.evaluate(() => {
-                  const el = document.querySelector('div[id^="model-response-message-content"], message-content');
+                  const el = document.querySelector('div[id^="model-response-message-content"], message-content, .message-content-inner');
                   return el ? el.innerText.trim() : '';
                 });
-                if (responseText && !responseText.includes('...')) break;
+
+                if (responseText.length > 0 && responseText.length === lastLength) {
+                  checkCount++;
+                  if (checkCount >= 2) break;
+                } else {
+                  checkCount = 0;
+                  if (responseText.length > 0) {
+                     lastLength = responseText.length;
+                  }
+                }
               }
 
-              console.log(`✅ [API CALL] Generation Complete! Returning payload.`);
+              console.log(`✅ [API] Generation Complete! Returning payload.`);
               res.json({ success: true, response: responseText });
             } catch (err) {
               console.error(`❌ [API ERROR]`, err.message);
@@ -177,7 +185,7 @@ jobs:
           SERVER_EOF
 
           node server.mjs &
-          sleep 12
+          sleep 5
 
       - name: 🔗 Bind & Expose via LocalTunnel Gateway
         run: |
