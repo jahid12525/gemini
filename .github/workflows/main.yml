@@ -67,11 +67,10 @@ jobs:
           import StealthPlugin from 'puppeteer-extra-plugin-stealth';
           import fs from 'fs';
           import os from 'os';
+          import path from 'path';
 
           chromium.use(StealthPlugin());
           const app = express();
-          
-          // multer ডিরেক্ট টেক্সট ফিল্ডও এক্সপ্রেস বডিতে পুশ করবে
           const upload = multer({ dest: os.tmpdir() });
           
           app.use(express.json());
@@ -108,41 +107,100 @@ jobs:
             }
           }
 
-          // upload.any() ব্যবহার করা হয়েছে যেন ইমেজ থাকুক বা না থাকুক, প্রম্পট টেক্সট সবসময় রিড হয়
           app.post('/api/gemini', upload.any(), async (req, res) => {
             if (!page) return res.status(500).json({ success: false, error: 'Browser stack not ready' });
             
-            // পাইথন থেকে পাঠানো ফর্ম-ডাটা এবং জেসন ডাটা দুইটাই চেক করবে
             const promptText = req.body.prompt;
-            
-            if (!promptText) {
-              console.log("❌ [API] Missing prompt in request body");
-              return res.status(400).json({ error: 'Prompt is required' });
-            }
+            if (!promptText) return res.status(400).json({ error: 'Prompt is required' });
 
             try {
-              console.log(`🤖 [API] New Request received. Prompt: ${promptText.substring(0, 30)}...`);
-              await page.goto('https://gemini.google.com/app/new', { waitUntil: 'domcontentloaded' });
+              console.log(`🤖 [API] New Request received. Prompt length: ${promptText.length}`);
+              
+              // ─── [FIX 408] ফুল পেজ রিলোড না করে ডিরেক্ট নিউ চ্যাট বাটনে ক্লিক ট্রিক ───
+              const newChatBtnSel = 'a[href="/app/new"], button:has-text("New chat"), [aria-label="New chat"]';
+              const newChatBtn = await page.$(newChatBtnSel);
+              
+              if (newChatBtn) {
+                await newChatBtn.click();
+                console.log("🔄 [API] Opened fresh chat via internal SPA button click (No Full Reload).");
+                await new Promise(r => setTimeout(r, 1200)); 
+              } else {
+                console.log("⚠️ New chat button not found in DOM, forcing light navigation...");
+                await page.goto('https://gemini.google.com/app', { waitUntil: 'commit' }); 
+                await new Promise(r => setTimeout(r, 2000));
+              }
+              
               try { await page.keyboard.press('Escape'); } catch(_) {}
 
-              // ইমেজ ফাইল হ্যান্ডলিং লজিক
+              // ─── আপনার প্রোজেক্টের অরিজিনাল ফিক্সড ইমেজ আপলোড লজিক ───
               if (req.files && req.files.length > 0) {
                 const file = req.files[0];
-                const inputFiles = await page.waitForSelector('input[type="file"]');
-                await inputFiles.setInputFiles(file.path);
-                fs.unlinkSync(file.path);
+                console.log(`📸 [API] Processing image upload: ${file.originalname}`);
+
+                const uploadBtnSelectors = [
+                  'button[aria-label="Open upload file menu"]',
+                  'button[aria-label="Upload file"]',
+                  'button[aria-label="Add image"]',
+                  'button[aria-label="Attach files"]',
+                  '[aria-label="Open upload file menu"]',
+                  '[data-test-id="upload-button"]',
+                ];
+
+                let uploadBtnClicked = false;
+                for (const sel of uploadBtnSelectors) {
+                  try {
+                    const btn = await page.$(sel);
+                    if (btn) {
+                      await btn.click();
+                      console.log(`   🖱️ Clicked upload button: ${sel}`);
+                      uploadBtnClicked = true;
+                      break;
+                    }
+                  } catch (_) {}
+                }
+
+                if (!uploadBtnClicked) {
+                  uploadBtnClicked = await page.evaluate(() => {
+                    const btn = [...document.querySelectorAll('button, [role="button"]')].find(el => {
+                      const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                      return label.includes('upload') || label.includes('attach') || label.includes('add image');
+                    });
+                    if (btn) { btn.click(); return true; }
+                    return false;
+                  });
+                }
+
+                if (uploadBtnClicked) {
+                  const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+                  if (fileInput) {
+                    await fileInput.setInputFiles(file.path);
+                    console.log('    ✅ Image attached successfully via setInputFiles!');
+                    await new Promise(r => setTimeout(r, 1500));
+                  }
+                } else {
+                  console.log('⚠️ Upload button couldn\'t be clicked, trying fallback direct attachment...');
+                  const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 3000 });
+                  await fileInput.setInputFiles(file.path);
+                }
+
+                if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
               }
 
+              // ─── প্রম্পট ইনপুট এরিয়া অ্যাক্টিভেশন ও ক্লিয়ারিং ───
               const inputSel = 'div.ql-editor[contenteditable="true"], div[role="textbox"], textarea';
-              await page.waitForSelector(inputSel);
+              await page.waitForSelector(inputSel, { timeout: 5000 });
               await page.click(inputSel, { force: true });
+              
+              await page.keyboard.press('Control+a');
+              await page.keyboard.press('Delete');
+              
               await page.keyboard.insertText(promptText);
               await page.keyboard.press('Enter');
 
               const responseSel = 'div[id^="model-response-message-content"], message-content, .message-content-inner';
-              await page.waitForSelector(responseSel);
+              await page.waitForSelector(responseSel, { timeout: 15000 });
 
-              // রিয়েল-টাইম SSE স্ট্রিমিং হেডার্স
+              // HTTP স্ট্রিমিং রেসপন্স হেডার সেটআপ
               res.setHeader('Content-Type', 'text/event-stream');
               res.setHeader('Cache-Control', 'no-cache');
               res.setHeader('Connection', 'keep-alive');
@@ -151,7 +209,7 @@ jobs:
               let noChangeCounter = 0;
 
               while (true) {
-                await new Promise(r => setTimeout(r, 200)); 
+                await new Promise(r => setTimeout(r, 200));
                 
                 const currentFullText = await page.evaluate((selector) => {
                   const el = document.querySelector(selector);
@@ -178,7 +236,7 @@ jobs:
                 }
               }
 
-              res.end(); 
+              res.end();
               console.log(`✅ [API] Realtime Stream Complete!`);
             } catch (err) {
               console.error(`❌ [API ERROR]`, err.message);
@@ -204,9 +262,9 @@ jobs:
           echo "🔗 Connecting LocalTunnel Gateway..."
           sudo npm install -g localtunnel
           
-          # অটো-রিস্টার্ট লুপ সহ লোকালটানেল রান করা হচ্ছে যেন ড্রপ করলে নিজে নিজেই কানেক্ট করে
+          # সাবডোমেন বিজি থাকলে বা ক্র্যাশ করলে অটো-রিস্টার্ট মেকানিজম লুপ
           until lt --port 8080 --subdomain ruslan-gemini-api; do
-            echo "🔄 LocalTunnel crashed or slot busy! Reconnecting in 3 seconds..."
+            echo "🔄 LocalTunnel slot busy or disconnected! Reconnecting in 3 seconds..."
             sleep 3
           done &
           
