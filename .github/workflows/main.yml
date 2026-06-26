@@ -1,9 +1,7 @@
 name: 🚀 Gemini Persistent Profile API Gateway
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 */5 * * *'
+  workflow_dispatch: # cron-job.org বা এক্সটার্নাল সার্ভিস থেকে সরাসরি এপিআই দিয়ে রান করার জন্য
 
 jobs:
   run-api-gateway:
