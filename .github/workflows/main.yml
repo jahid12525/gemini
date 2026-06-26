@@ -1,4 +1,62 @@
-- name: 🛠️ Create & Start API Gateway Server
+name: 🚀 Gemini Persistent Profile API Gateway
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-api-gateway:
+    name: 🌐 Launch Persistent API + LocalTunnel
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📦 Checkout Repository Code
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js Environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 📥 Install System & Node Dependencies
+        run: |
+          npm init -y
+          npm install express playwright playwright-extra puppeteer-extra-plugin-stealth localtunnel multer
+          npx playwright install chrome --with-deps
+
+      - name: 🖥️ Start Virtual Display (Xvfb)
+        run: |
+          sudo apt-get install -y xvfb
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+
+      - name: 📂 Download & Extract Google Profile Securely
+        env:
+          DOWNLOAD_URL: ${{ secrets.PROFILE_DOWNLOAD_URL }}
+        run: |
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "❌ Error: PROFILE_DOWNLOAD_URL secret is missing!"
+            exit 1
+          fi
+          
+          echo "📥 Downloading profile from secure cloud link..."
+          wget -q -O gemini_profile.zip "$DOWNLOAD_URL"
+          
+          if [ -s "gemini_profile.zip" ]; then
+            unzip -q gemini_profile.zip -d ./
+            echo "🧹 Cleaning Windows specific lock files from profile..."
+            rm -f ./gemini_profile/SingletonLock
+            rm -f ./gemini_profile/Lock
+            rm -f ./gemini_profile/Google\ Profile\ Lock
+            rm -rf ./gemini_profile/Default/Cache/*
+            rm -f gemini_profile.zip
+            echo "✅ Secure Profile directory is ready!"
+          else
+            echo "❌ Error: Failed to download gemini_profile.zip!"
+            exit 1
+          fi
+
+      - name: 🛠️ Create & Start API Gateway Server
         run: |
           mkdir -p /tmp/gemini-recordings
 
@@ -39,23 +97,10 @@
               });
 
               page = await context.newPage();
-              
-              console.log("⚡ [CONSOLE UPDATE] Navigating to https://gemini.google.com/app...");
               await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded' });
-              
-              const currentUrl = page.url();
-              console.log(`📡 [CONSOLE UPDATE] Current Active Browser URL: ${currentUrl}`);
-              
-              if(currentUrl.includes('accounts.google.com')) {
-                console.error("❌ [SECURITY ALERT] Google rejected persistent context!");
-                await page.screenshot({ path: '/tmp/gemini-recordings/auth_failed_screenshot.png' });
-              } else {
-                console.log("✅ [CONSOLE UPDATE] Gemini Persistent Browser Stack Ready & Verified!");
-                await page.screenshot({ path: '/tmp/gemini-recordings/auth_success_screenshot.png' });
-              }
-              
+              console.log("✅ [CONSOLE UPDATE] Gemini Browser Ready!");
             } catch (err) {
-              console.error("❌ [CRITICAL ERROR] Failed to initialize Gemini Browser:", err.message);
+              console.error("❌ [CRITICAL ERROR] Init failed:", err.message);
             }
           }
 
@@ -64,61 +109,76 @@
             
             const promptText = req.body.prompt;
             const file = req.file;
-
             if (!promptText) return res.status(400).json({ error: 'Prompt is required' });
 
             try {
-              console.log(`🤖 [API] Request Received: ${promptText}`);
-              
+              console.log(`🤖 [API] New Request received.`);
               await page.goto('https://gemini.google.com/app/new', { waitUntil: 'domcontentloaded' });
               try { await page.keyboard.press('Escape'); } catch(_) {}
 
-              // ইমেজ থাকলে শুধুমাত্র এখানে সেফটি বাফার কাজ করবে যেন ৪MD বা বড় ইমেজ ড্রপ না হয়
               if (file) {
-                console.log(`📎 [API] Attaching Image Asset to Gemini...`);
-                const inputFiles = await page.waitForSelector('input[type="file"]', { timeout: 10000 });
+                const inputFiles = await page.waitForSelector('input[type="file"]');
                 await inputFiles.setInputFiles(file.path);
-                // জেমিনি ইন্টারফেসে ইমেজটি আপলোড হয়ে স্ট্যাবল হওয়ার জন্য ৩ সেকেন্ডের রিয়েল সেফটি ওয়েট
-                await new Promise(r => setTimeout(r, 3000));
                 fs.unlinkSync(file.path);
               }
 
               const inputSel = 'div.ql-editor[contenteditable="true"], div[role="textbox"], textarea';
-              await page.waitForSelector(inputSel, { timeout: 10000 });
+              await page.waitForSelector(inputSel);
               await page.click(inputSel, { force: true });
               await page.keyboard.insertText(promptText);
               await page.keyboard.press('Enter');
-              console.log(`📡 [API] Prompt submitted. Scraping response chunks...`);
 
-              let responseText = '';
-              let lastLength = 0;
-              let checkCount = 0;
-              
-              // ইমেজ প্রসেসিংয়ের জন্য এই লুপে ১.৫ সেকেন্ডের বদলে ২.৫ সেকেন্ড ইন্টারভাল দেওয়া হলো
+              const responseSel = 'div[id^="model-response-message-content"], message-content, .message-content-inner';
+              await page.waitForSelector(responseSel);
+
+              // HTTP স্ট্রিমিং রেসপন্স হেডার সেটআপ
+              res.setHeader('Content-Type', 'text/event-stream');
+              res.setHeader('Cache-Control', 'no-cache');
+              res.setHeader('Connection', 'keep-alive');
+
+              let lastSentText = "";
+              let noChangeCounter = 0;
+
+              // মিউটেশন বা পোলিং এর মাধ্যমে ডমের লাইভ ক্যারেক্টার ট্র্যাক লুপ (জিরো এক্সট্রা ডিলে)
               while (true) {
-                await new Promise(r => setTimeout(r, 2500)); 
+                await new Promise(r => setTimeout(r, 200)); // ২০০ মিলি-সেকেন্ড পর পর ডম থেকে নতুন ক্যারেক্টার পিক করবে
                 
-                responseText = await page.evaluate(() => {
-                  const el = document.querySelector('div[id^="model-response-message-content"], message-content, .message-content-inner');
+                const currentFullText = await page.evaluate((selector) => {
+                  const el = document.querySelector(selector);
                   return el ? el.innerText.trim() : '';
-                });
+                }, responseSel);
 
-                if (responseText.length > 0 && responseText.length === lastLength) {
-                  checkCount++;
-                  if (checkCount >= 2) break; // রেসপন্স কমপ্লিট ও স্ট্যাবল হলে ব্রেক
-                } else {
-                  checkCount = 0;
-                  if (responseText.length > 0) {
-                     lastLength = responseText.length;
+                if (currentFullText.length > lastSentText.length) {
+                  // শুধুমাত্র নতুন অংশটুকু (শব্দ বা ক্যারেক্টার) কেটে ক্লায়েন্টকে লাইভ পাঠানো হচ্ছে
+                  const newChunk = currentFullText.substring(lastSentText.length);
+                  res.write(newChunk);
+                  lastSentText = currentFullText;
+                  noChangeCounter = 0;
+                } else if (currentFullText.length > 0 && currentFullText.length === lastSentText.length) {
+                  noChangeCounter++;
+                  
+                  // জেমিনির জেনারেশন শেষ কিনা তা যাচাই করার কন্ডিশন
+                  const isFinished = await page.evaluate((selector) => {
+                    const el = document.querySelector(selector);
+                    if (!el) return true;
+                    return !el.innerHTML.includes('loading') && !el.innerHTML.includes('...');
+                  }, responseSel);
+
+                  if (noChangeCounter > 5 && isFinished) {
+                    break;
                   }
                 }
               }
 
-              console.log(`✅ [API] Generation Complete! Returning payload.`);
-              res.json({ success: true, response: responseText });
+              res.end(); // স্ট্রিমিং শেষ
+              console.log(`✅ [API] Realtime Stream Complete!`);
             } catch (err) {
               console.error(`❌ [API ERROR]`, err.message);
-              res.status(500).json({ success: false, error: err.message });
+              if (!res.headersSent) {
+                res.status(500).json({ success: false, error: err.message });
+              } else {
+                res.end();
+              }
             }
           });
 
@@ -130,3 +190,18 @@
 
           node server.mjs &
           sleep 5
+
+      - name: 🔗 Bind & Expose via LocalTunnel Gateway
+        run: |
+          echo "🔗 Connecting LocalTunnel Gateway..."
+          sudo npm install -g localtunnel
+          lt --port 8080 --subdomain ruslan-gemini-api &
+          sleep 18000
+
+      - name: 🎥 Upload Live Screen Recording & Debug Assets
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-live-recording
+          path: /tmp/gemini-recordings/
+          retention-days: 3
