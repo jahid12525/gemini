@@ -22,7 +22,7 @@ jobs:
       - name: 📥 Install System & Node Dependencies
         run: |
           npm init -y
-          npm install express playwright-extra puppeteer-extra-plugin-stealth localtunnel multer
+          npm install express playwright playwright-extra puppeteer-extra-plugin-stealth localtunnel multer
           npx playwright install chrome --with-deps
 
       - name: 🖥️ Start Virtual Display (Xvfb)
@@ -49,7 +49,6 @@ jobs:
 
       - name: 🛠️ Create & Start API Gateway Server
         run: |
-          # ভিডিও সেভ করার জন্য রানারে একটি ফোল্ডার তৈরি
           mkdir -p /tmp/gemini-recordings
 
           cat > server.mjs << 'SERVER_EOF'
@@ -82,7 +81,6 @@ jobs:
                   '--disable-gpu'
                 ],
                 viewport: { width: 1280, height: 800 },
-                // স্ক্রিন রেকর্ডিং অন করার কমান্ড
                 recordVideo: {
                   dir: '/tmp/gemini-recordings/',
                   size: { width: 1280, height: 800 }
@@ -102,7 +100,6 @@ jobs:
               
               if(currentUrl.includes('accounts.google.com')) {
                 console.error("❌ [SECURITY ALERT] Google rejected persistent context! Redirected to Login Page.");
-                // ডায়াগনস্টিক স্ক্রিনশট সেভ
                 await page.screenshot({ path: '/tmp/gemini-recordings/auth_failed_screenshot.png' });
               } else {
                 console.log("✅ [CONSOLE UPDATE] Gemini Persistent Browser Stack Ready & Verified!");
@@ -180,9 +177,8 @@ jobs:
           echo "⏰ Active Shift Started. Listening for API cURL calls..."
           sleep 18000
 
-      # ব্রাউজার ভিডিও এবং স্ক্রিনশট গিটহাবে আপলোড করার ফাইনাল স্টেপ
       - name: 🎥 Upload Live Screen Recording & Debug Assets
-        if: always() # রান ফেল করলেও যেন ভিডিও আপলোড হয়
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gemini-live-recording
