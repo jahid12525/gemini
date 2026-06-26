@@ -32,18 +32,30 @@ jobs:
           sleep 2
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: 📂 Extract & Clean Google Profile
+      - name: 📂 Download & Extract Google Profile Securely
+        env:
+          DOWNLOAD_URL: ${{ secrets.PROFILE_DOWNLOAD_URL }}
         run: |
-          if [ -f "gemini_profile.zip" ]; then
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "❌ Error: PROFILE_DOWNLOAD_URL secret is missing!"
+            exit 1
+          fi
+          
+          echo "📥 Downloading profile from secure cloud link..."
+          # Dropbox থেকে ডিরেক্ট রানারে জিপ ফাইলটি নামানো হচ্ছে
+          wget -q -O gemini_profile.zip "$DOWNLOAD_URL"
+          
+          if [ -s "gemini_profile.zip" ]; then
             unzip -q gemini_profile.zip -d ./
             echo "🧹 Cleaning Windows specific lock files from profile..."
             rm -f ./gemini_profile/SingletonLock
             rm -f ./gemini_profile/Lock
             rm -f ./gemini_profile/Google\ Profile\ Lock
             rm -rf ./gemini_profile/Default/Cache/*
-            echo "✅ Profile directory is ready!"
+            rm -f gemini_profile.zip
+            echo "✅ Secure Profile directory is ready!"
           else
-            echo "❌ Error: gemini_profile.zip not found!"
+            echo "❌ Error: Failed to download gemini_profile.zip (File is empty)!"
             exit 1
           fi
 
@@ -120,7 +132,7 @@ jobs:
             if (!promptText) return res.status(400).json({ error: 'Prompt is required' });
 
             try {
-              console.log(`📥 [API CALL] Request Received. Processing Prompt...`);
+              console.log(`🤖 Request Received: ${promptText}`);
               await page.goto('https://gemini.google.com/app/new', { waitUntil: 'domcontentloaded' });
               await new Promise(r => setTimeout(r, 2000));
               try { await page.keyboard.press('Escape'); } catch(_) {}
