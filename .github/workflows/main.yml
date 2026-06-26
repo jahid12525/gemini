@@ -32,18 +32,26 @@ jobs:
           sleep 2
           echo "DISPLAY=:99" >> $GITHUB_ENV
 
-      - name: 📂 Extract Persistent Google Profile
+      - name: 📂 Extract & Clean Google Profile
         run: |
           if [ -f "gemini_profile.zip" ]; then
             unzip -q gemini_profile.zip -d ./
-            ls -la ./gemini_profile
+            echo "🧹 Cleaning Windows specific lock files from profile..."
+            rm -f ./gemini_profile/SingletonLock
+            rm -f ./gemini_profile/Lock
+            rm -f ./gemini_profile/Google\ Profile\ Lock
+            rm -rf ./gemini_profile/Default/Cache/*
+            echo "✅ Profile directory is ready!"
           else
-            echo "❌ Error: gemini_profile.zip not found in repository root!"
+            echo "❌ Error: gemini_profile.zip not found!"
             exit 1
           fi
 
       - name: 🛠️ Create & Start API Gateway Server
         run: |
+          # ভিডিও সেভ করার জন্য রানারে একটি ফোল্ডার তৈরি
+          mkdir -p /tmp/gemini-recordings
+
           cat > server.mjs << 'SERVER_EOF'
           import express from 'express';
           import multer from 'multer';
@@ -61,44 +69,67 @@ jobs:
           let context, page;
 
           async function initGemini() {
-            console.log("🌐 Launching Chromium with Persistent Context...");
-            
-            context = await chromium.launchPersistentContext('./gemini_profile', {
-              headless: false,
-              channel: 'chrome',
-              args: [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-web-security'
-              ],
-              viewport: { width: 1280, height: 800 }
-            });
+            try {
+              console.log("⚡ [CONSOLE UPDATE] Launching Local Google Chrome Instance...");
+              context = await chromium.launchPersistentContext('./gemini_profile', {
+                headless: false,
+                channel: 'chrome',
+                args: [
+                  '--no-sandbox', 
+                  '--disable-setuid-sandbox',
+                  '--disable-blink-features=AutomationControlled',
+                  '--disable-web-security',
+                  '--disable-gpu'
+                ],
+                viewport: { width: 1280, height: 800 },
+                // স্ক্রিন রেকর্ডিং অন করার কমান্ড
+                recordVideo: {
+                  dir: '/tmp/gemini-recordings/',
+                  size: { width: 1280, height: 800 }
+                }
+              });
 
-            page = await context.newPage();
-            
-            console.log("🔐 Checking Gemini Live Session Status...");
-            await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 50000 });
-            await new Promise(r => setTimeout(r, 5000));
-            
-            console.log(`Current Connected URL: ${page.url()}`);
-            console.log("✅ Gemini Persistent Browser Stack Ready!");
+              page = await context.newPage();
+              
+              console.log("⚡ [CONSOLE UPDATE] Navigating to https://gemini.google.com/app...");
+              await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 60000 });
+              
+              console.log("⚡ [CONSOLE UPDATE] Waiting 5 seconds for session restoration and cookies verification...");
+              await new Promise(r => setTimeout(r, 5000));
+              
+              const currentUrl = page.url();
+              console.log(`📡 [CONSOLE UPDATE] Current Active Browser URL: ${currentUrl}`);
+              
+              if(currentUrl.includes('accounts.google.com')) {
+                console.error("❌ [SECURITY ALERT] Google rejected persistent context! Redirected to Login Page.");
+                // ডায়াগনস্টিক স্ক্রিনশট সেভ
+                await page.screenshot({ path: '/tmp/gemini-recordings/auth_failed_screenshot.png' });
+              } else {
+                console.log("✅ [CONSOLE UPDATE] Gemini Persistent Browser Stack Ready & Verified!");
+                await page.screenshot({ path: '/tmp/gemini-recordings/auth_success_screenshot.png' });
+              }
+              
+            } catch (err) {
+              console.error("❌ [CRITICAL ERROR] Failed to initialize Gemini Browser:", err.message);
+            }
           }
 
           app.post('/api/gemini', upload.single('image'), async (req, res) => {
+            if (!page) return res.status(500).json({ success: false, error: 'Browser stack not ready or crashed' });
+            
             const promptText = req.body.prompt;
             const file = req.file;
 
             if (!promptText) return res.status(400).json({ error: 'Prompt is required' });
 
             try {
-              console.log(`🤖 Request Received: ${promptText}`);
+              console.log(`📥 [API CALL] Request Received. Processing Prompt...`);
               await page.goto('https://gemini.google.com/app/new', { waitUntil: 'domcontentloaded' });
               await new Promise(r => setTimeout(r, 2000));
               try { await page.keyboard.press('Escape'); } catch(_) {}
 
               if (file) {
-                console.log(`📎 Uploading Image Asset to Gemini input...`);
+                console.log(`📎 [API CALL] Attaching Image Multi-part stream...`);
                 const inputFiles = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
                 await inputFiles.setInputFiles(file.path);
                 await new Promise(r => setTimeout(r, 2000));
@@ -109,6 +140,7 @@ jobs:
               await page.click(inputSel, { force: true });
               await page.keyboard.insertText(promptText);
               await page.keyboard.press('Enter');
+              console.log(`📡 [API CALL] Prompt submitted. Waiting for streaming tokens...`);
 
               let responseText = '';
               const deadline = Date.now() + 75000;
@@ -121,20 +153,22 @@ jobs:
                 if (responseText && !responseText.includes('...')) break;
               }
 
+              console.log(`✅ [API CALL] Generation Complete! Returning payload.`);
               res.json({ success: true, response: responseText });
             } catch (err) {
+              console.error(`❌ [API ERROR]`, err.message);
               res.status(500).json({ success: false, error: err.message });
             }
           });
 
-          app.listen(PORT, async () => {
+          app.listen(PORT, '0.0.0.0', async () => {
             console.log(`🚀 API Internal Server running on port ${PORT}`);
             await initGemini();
           });
           SERVER_EOF
 
           node server.mjs &
-          sleep 8
+          sleep 12
 
       - name: 🔗 Bind & Expose via LocalTunnel Gateway
         run: |
@@ -145,4 +179,12 @@ jobs:
           
           echo "⏰ Active Shift Started. Listening for API cURL calls..."
           sleep 18000
-          echo "🛑 Shift ended. Transferring gateway pointer to next account."
+
+      # ব্রাউজার ভিডিও এবং স্ক্রিনশট গিটহাবে আপলোড করার ফাইনাল স্টেপ
+      - name: 🎥 Upload Live Screen Recording & Debug Assets
+        if: always() # রান ফেল করলেও যেন ভিডিও আপলোড হয়
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-live-recording
+          path: /tmp/gemini-recordings/
+          retention-days: 3
