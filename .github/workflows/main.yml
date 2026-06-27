@@ -1,4 +1,4 @@
-name: 🚀 Gemini API Gateway via ngrok (No More 502)
+name: 🚀 Gemini API Gateway via ngrok (Ubuntu 24.04 Fixed)
 
 on:
   workflow_dispatch:
@@ -183,27 +183,26 @@ jobs:
             }
           });
 
-          // এক্সপ্রেস সার্ভার এখন লোকালহোস্ট পোর্টে লিসেন করবে
           app.listen(PORT, '127.0.0.1', async () => {
             await initGemini();
-            print(`🤖 Local API Server running on http://127.0.0.1:${PORT}`);
+            console.log(`🤖 Local API Server running on http://127.0.0.1:${PORT}`);
           });
           SERVER_EOF
 
-          echo "📥 Installing ngrok..."
-          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.md5/ngrok.asc >/dev/null
-          echo "deb https://ngrok-agent.s3.amazonaws.com noble main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+          echo "📥 Installing ngrok via Official Ubuntu Keyring..."
+          # উবুন্টু ২৪.০৪ এর জন্য ডিরেক্টরি সেফ অফিশিয়াল ইনস্টলেশন
+          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo gpg --dearmor -o /usr/share/keyrings/ngrok.gpg
+          echo "deb [signed-by=/usr/share/keyrings/ngrok.gpg] https://ngrok-agent.s3.amazonaws.com noble main" | sudo tee /etc/apt/sources.list.d/ngrok.list
           sudo apt-get update && sudo apt-get install ngrok -y
 
           echo "⚡ Configuring ngrok Token..."
           ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
 
           echo "🌐 Starting ngrok Tunnel on Port 3000..."
-          # ব্যাকগ্রাউন্ডে টানেল অন করে পাবলিক URL বের করার জন্য
           ngrok http 127.0.0.1:3000 --log=stdout > ngrok.log &
           
           sleep 5
-          echo "========================================= ===="
+          echo "=============================================="
           echo "🔗 YOUR NGROK PUBLIC TUNNEL URL: 🔗"
           curl -s http://127.0.0.1:4040/api/tunnels | json_pp | grep public_url
           echo "=============================================="
