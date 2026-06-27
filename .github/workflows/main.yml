@@ -1,4 +1,4 @@
-name: 🚀 Gemini API Gateway via ngrok (Ubuntu 24.04 Fixed)
+name: 🚀 Gemini API Gateway via ngrok (100% Fixed Binary Method)
 
 on:
   workflow_dispatch:
@@ -189,11 +189,13 @@ jobs:
           });
           SERVER_EOF
 
-          echo "📥 Installing ngrok via Official Ubuntu Keyring..."
-          # উবুন্টু ২৪.০৪ এর জন্য ডিরেক্টরি সেফ অফিশিয়াল ইনস্টলেশন
-          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo gpg --dearmor -o /usr/share/keyrings/ngrok.gpg
-          echo "deb [signed-by=/usr/share/keyrings/ngrok.gpg] https://ngrok-agent.s3.amazonaws.com noble main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt-get update && sudo apt-get install ngrok -y
+          echo "📥 Downloading ngrok Linux Binary directly..."
+          # ওএস ডিস্ট্রিবিউশন এড়াতে ডিরেক্ট লিনাক্স বাইনারি ডাউনলোড ও ইনস্টল
+          wget -q https://bin.equinox.io/c/bPf36xmqYQe/ngrok-stable-linux-amd64.zip
+          unzip -q ngrok-stable-linux-amd64.zip
+          sudo mv ngrok /usr/local/bin/
+          rm -f ngrok-stable-linux-amd64.zip
+          echo "✅ ngrok Binary Installed Successfully!"
 
           echo "⚡ Configuring ngrok Token..."
           ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
