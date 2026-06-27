@@ -1,12 +1,7 @@
-name: 🚀 Gemini Persistent Profile API Gateway (Telegram Turbo Original Method)
+name: 🚀 Gemini Persistent Profile API Gateway (No Manual Cookies)
 
 on:
   workflow_dispatch:
-    inputs:
-      gemini_session:
-        description: "🌐 Gemini Web Session JSON (paste storageState JSON)"
-        required: false
-        default: ""
 
 jobs:
   run-api-gateway:
@@ -36,10 +31,23 @@ jobs:
           echo "DISPLAY=:99" >> $GITHUB_ENV
           echo "✅ Xvfb virtual display started on :99"
 
-      - name: 🛠️ Launch Gemini Telegram Bridge Engine
+      - name: 📂 Download & Extract Google Profile Securely
         env:
-          GEMINI_SESSION: ${{ secrets.GEMINI_SESSION }}
-          GEMINI_SESSION_INPUT: ${{ github.event.inputs.gemini_session }}
+          DOWNLOAD_URL: ${{ secrets.PROFILE_DOWNLOAD_URL }}
+        run: |
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "❌ Error: PROFILE_DOWNLOAD_URL secret is missing!"
+            exit 1
+          fi
+          wget -q -O gemini_profile.zip "$DOWNLOAD_URL"
+          unzip -q gemini_profile.zip -d ./
+          # লক ফাইল থাকলে প্লে-রাইট ক্র্যাশ করে, তাই এগুলো রিমুভ করা সেফ
+          rm -f ./gemini_profile/SingletonLock ./gemini_profile/Lock ./gemini_profile/Google\ Profile\ Lock
+          rm -rf ./gemini_profile/Default/Cache/*
+          rm -f gemini_profile.zip
+          echo "✅ Google Profile Loaded Successfully!"
+
+      - name: 🛠️ Launch Gemini Telegram Bridge Engine
         run: |
           cat > telegram_bridge.mjs << 'TG_EOF'
           import fetch from 'node-fetch';
@@ -55,53 +63,13 @@ jobs:
           const CHAT_ID = "680349125";
           const TG_API = `https://api.telegram.org/bot${TOKEN}`;
           
-          const GEMINI_SESSION_RAW = (process.env.GEMINI_SESSION_INPUT?.trim() || process.env.GEMINI_SESSION || '').trim();
-          
-          if (!GEMINI_SESSION_RAW) {
-            console.error('❌ Error: GEMINI_SESSION secret or input is missing.');
-            process.exit(1);
-          }
-
-          // ─── COOKIE NORMALIZER (আপনার অরিজিনাল মেথড) ──────────────────────────────
-          function normalizeCookies(rawCookies) {
-            return rawCookies.map(c => {
-              let sameSite = 'None';
-              if (c.sameSite) {
-                const ss = c.sameSite.toLowerCase();
-                if (ss === 'lax')                               sameSite = 'Lax';
-                else if (ss === 'strict')                       sameSite = 'Strict';
-                else if (ss === 'none' || ss === 'no_restriction') sameSite = 'None';
-              }
-              const expires = c.expires   !== undefined ? Math.floor(c.expires) :
-                              c.expirationDate !== undefined ? Math.floor(c.expirationDate) :
-                              -1;
-              return {
-                name:     c.name,
-                value:    c.value,
-                domain:   c.domain,
-                path:     c.path || '/',
-                expires,
-                httpOnly: !!c.httpOnly,
-                secure:   !!c.secure,
-                sameSite,
-              };
-            });
-          }
-
-          let parsed = JSON.parse(GEMINI_SESSION_RAW);
-          let GEMINI_STORAGE_STATE = {
-            cookies: normalizeCookies(parsed.cookies || parsed),
-            origins: Array.isArray(parsed.origins) ? parsed.origins : []
-          };
-
-          const STORAGE_STATE_FILE = path.join(os.tmpdir(), 'gemini_storage_state.json');
-          fs.writeFileSync(STORAGE_STATE_FILE, JSON.stringify(GEMINI_STORAGE_STATE, null, 2));
-
           let context, page;
 
           async function initGemini() {
             try {
-              console.log("⚡ Launching Local Google Chrome Instance using StorageState...");
+              console.log("⚡ Launching Local Google Chrome Instance via Persistent Profile Folder...");
+              
+              // ডিরেক্ট তোর আপলোড করা প্রোফাইল ফোল্ডার রিড করবে, কোনো এক্সট্রা কুকিজ ফাইল লাগবে না
               context = await chromium.launchPersistentContext('./gemini_profile', {
                 headless: false,
                 channel: 'chrome',
@@ -113,14 +81,11 @@ jobs:
                   '--disable-features=IsolateOrigins,site-per-process'
                 ]
               });
-              
-              // আপনার মেথড অনুযায়ী স্টোরেজ স্টেট ফাইল লোড করা
-              await context.setStorageState({ path: STORAGE_STATE_FILE });
 
               page = await context.newPage();
-              await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 30000 });
+              await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 40000 });
               
-              console.log("✅ Gemini Browser Ready! Listening to Telegram Bot...");
+              console.log("✅ Gemini Browser Ready via Profile! Listening to Telegram Bot...");
               await sendTelegramMessage("🟢 Gemini Cloud Runner is Active & Ready!");
             } catch (err) { console.error("❌ Init failed:", err.message); process.exit(1); }
           }
@@ -141,7 +106,7 @@ jobs:
 
               try { await page.keyboard.press('Escape'); } catch(_) {}
 
-              // ─── আপনার ইমেজ আপলোড মেথড (setInputFiles) ─────────────────────────────
+              // ইমেজ আপলোড (তোর অরিজিনাল inputFiles মেথড)
               if (localImagePath && fs.existsSync(localImagePath)) {
                 console.log(`📎 Uploading image: ${path.basename(localImagePath)}`);
                 const uploadBtnSelectors = [
@@ -169,7 +134,7 @@ jobs:
                 }
               }
 
-              // ─── আপনার টেক্সট ইনপুট ও সাবমিট মেথড ──────────────────────────────
+              // টেক্সট ইনপুট ও সাবমিট (তোর অরিজিনাল মেথড)
               console.log(`🌐 Sending prompt...`);
               const inputSel = 'div.ql-editor[contenteditable="true"]';
               await page.waitForSelector(inputSel, { timeout: 15000 });
@@ -183,7 +148,7 @@ jobs:
               await page.keyboard.press('Enter');
               console.log(`    ⌨️ Submitted via Enter key`);
 
-              // ─── রেসপন্স ট্র্যাকিং লজিক ──────────────────────────────────────────
+              // রেসপন্স স্ক্র্যাপ লজিক
               const responseSel = 'div[id^="model-response-message-content"], message-content, .message-content-inner';
               await page.waitForSelector(responseSel, { timeout: 15000 });
 
@@ -223,7 +188,6 @@ jobs:
                 }
               }
 
-              // ফাইনাল রেসপন্স পুশ
               await fetch(`${TG_API}/editMessageText`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -270,7 +234,7 @@ jobs:
                       }
 
                       if (promptText && !promptText.startsWith('/start')) {
-                        console.log(`🚀 Task Received via Telegram: ${promptText.substring(0, 30)}...`);
+                        console.log(`🚀 Task Received: ${promptText.substring(0, 30)}...`);
                         await processGeminiTask(promptText, localImagePath);
                       }
                     }
