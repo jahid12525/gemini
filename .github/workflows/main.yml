@@ -1,4 +1,4 @@
-name: 🚀 Gemini API Gateway via Playit.gg (Fixed Tunnel)
+name: 🚀 Gemini API Gateway via Playit.gg (Fixed Actions)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 📦 Setup Node.js Environment
-        uses: actions/setup-version@v4
+        uses: actions/setup-node@v4
         with:
           node-version: 20
 
@@ -53,10 +53,9 @@ jobs:
           echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit.list
           sudo apt-get update -y && sudo apt-get install playit -y
           
-          # কাস্টম সিক্রেট কি যদি আগে থেকে সেভ করা থাকে তার জন্য ডিরেক্টরি ব্যাকআপ
           mkdir -p ~/.config/playit
           if [ ! -z "${{ secrets.PLAYIT_SECRET_KEY }}" ]; then
-            echo "📝 Found secret key, inject configuring..."
+            echo "📝 Found secret key, configuring..."
             cat > ~/.config/playit/playit.toml << EOF
             secret_key = "${{ secrets.PLAYIT_SECRET_KEY }}"
           EOF
@@ -207,11 +206,11 @@ jobs:
           });
           SERVER_EOF
 
-          # ফিক্সড কমান্ড: প্লে-ইট ব্যাকগ্রাউন্ডে রান করা (কোনো এরর ছাড়াই)
+          # প্লে-ইট রান করা
           playit run > playit_log.txt 2>&1 &
           
-          # ক্লেইম ইউআরএল জেনারেট হওয়ার জন্য ৩ সেকেন্ড পজ
-          sleep 3
+          # ক্লেইম কোড জেনারেট হতে ৫ সেকেন্ড বিরতি
+          sleep 5
           
           if [ -f playit_log.txt ]; then
             echo "=================================================="
