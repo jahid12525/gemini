@@ -1,11 +1,11 @@
-name: 🚀 Gemini Persistent Profile API Gateway (Firebase Bridge)
+name: 🚀 Gemini Persistent Profile API Gateway (Firebase Turbo)
 
 on:
   workflow_dispatch:
 
 jobs:
   run-api-gateway:
-    name: 🌐 Launch Persistent API + Firebase Bridge Engine
+    name: 🌐 Launch Persistent API + Firebase Turbo Engine
     runs-on: ubuntu-latest
 
     steps:
@@ -34,15 +34,9 @@ jobs:
         env:
           DOWNLOAD_URL: ${{ secrets.PROFILE_DOWNLOAD_URL }}
         run: |
-          if [ -z "$DOWNLOAD_URL" ]; then
-            echo "❌ Error: PROFILE_DOWNLOAD_URL secret is missing!"
-            exit 1
-          fi
           wget -q -O gemini_profile.zip "$DOWNLOAD_URL"
           unzip -q gemini_profile.zip -d ./
-          rm -f ./gemini_profile/SingletonLock
-          rm -f ./gemini_profile/Lock
-          rm -f ./gemini_profile/Google\ Profile\ Lock
+          rm -f ./gemini_profile/SingletonLock ./gemini_profile/Lock ./gemini_profile/Google\ Profile\ Lock
           rm -rf ./gemini_profile/Default/Cache/*
           rm -f gemini_profile.zip
           echo "✅ Google Profile Ready!"
@@ -51,8 +45,6 @@ jobs:
         env:
           FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
         run: |
-          mkdir -p /tmp/gemini-recordings
-
           cat > bridge.mjs << 'BRIDGE_EOF'
           import fetch from 'node-fetch';
           import { chromium } from 'playwright-extra';
@@ -62,77 +54,56 @@ jobs:
           import path from 'path';
 
           chromium.use(StealthPlugin());
-          
           const DB_URL = process.env.FIREBASE_DB_URL.replace(/\/$/, "");
           let context, page;
 
           async function initGemini() {
             try {
-              console.log("⚡ Launching Local Google Chrome Instance...");
               context = await chromium.launchPersistentContext('./gemini_profile', {
-                headless: false,
-                channel: 'chrome',
-                args: [
-                  '--no-sandbox', '--disable-setuid-sandbox',
-                  '--disable-blink-features=AutomationControlled', '--disable-web-security', '--disable-gpu'
-                ],
-                viewport: { width: 1280, height: 800 },
-                recordVideo: { dir: '/tmp/gemini-recordings/', size: { width: 1280, height: 800 } }
+                headless: false, channel: 'chrome',
+                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--disable-web-security', '--disable-gpu'],
+                viewport: { width: 1280, height: 800 }
               });
               page = await context.newPage();
               await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded' });
-              console.log("✅ Gemini Browser Ready! Listening to Firebase Database...");
-            } catch (err) {
-              console.error("❌ Init failed:", err.message);
-              process.exit(1);
-            }
+              console.log("✅ Gemini Browser Ready! Listening...");
+            } catch (err) { process.exit(1); }
           }
 
           async function processGeminiTask(promptText, base64Image) {
             let tempFilePath = null;
             try {
-              // New Chat SPA Click
+              const inputSel = 'div.ql-editor[contenteditable="true"], div[role="textbox"], textarea';
+              await page.waitForSelector(inputSel, { state: 'visible', timeout: 10000 });
+
+              try { await page.keyboard.press('Escape'); } catch(_) {}
               const newChatBtnSel = 'a[href="/app/new"], button:has-text("New chat"), [aria-label="New chat"]';
               const newChatBtn = await page.$(newChatBtnSel);
               if (newChatBtn) {
-                await newChatBtn.click();
-                await new Promise(r => setTimeout(r, 1200)); 
+                await newChatBtn.click({ force: true });
+                await new Promise(r => setTimeout(r, 1500)); 
               } else {
                 await page.goto('https://gemini.google.com/app', { waitUntil: 'commit' }); 
                 await new Promise(r => setTimeout(r, 2000));
               }
               try { await page.keyboard.press('Escape'); } catch(_) {}
 
-              // ইমেজ ডিকোড ও আপলোড
               if (base64Image) {
                 tempFilePath = path.join(os.tmpdir(), `upload_${Date.now()}.jpg`);
                 fs.writeFileSync(tempFilePath, Buffer.from(base64Image, 'base64'));
 
-                const uploadBtnSelectors = [
-                  'button[aria-label="Open upload file menu"]', 'button[aria-label="Upload file"]',
-                  'button[aria-label="Add image"]', 'button[aria-label="Attach files"]',
-                ];
-
+                const uploadBtnSelectors = ['button[aria-label="Open upload file menu"]', 'button[aria-label="Upload file"]', 'button[aria-label="Add image"]', 'button[aria-label="Attach files"]'];
                 let uploadBtnClicked = false;
                 for (const sel of uploadBtnSelectors) {
-                  try {
-                    const btn = await page.$(sel);
-                    if (btn) { await btn.click(); uploadBtnClicked = true; break; }
-                  } catch (_) {}
+                  try { const btn = await page.$(sel); if (btn) { await btn.click({ force: true }); uploadBtnClicked = true; break; } } catch (_) {}
                 }
-
                 if (uploadBtnClicked) {
-                  const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
-                  if (fileInput) {
-                    await fileInput.setInputFiles(tempFilePath);
-                    await new Promise(r => setTimeout(r, 1500));
-                  }
+                  const fileInput = await page.waitForSelector('input[type="file"]', { state: 'attached', timeout: 5000 });
+                  if (fileInput) { await fileInput.setInputFiles(tempFilePath); await new Promise(r => setTimeout(r, 1500)); }
                 }
               }
 
-              // প্রম্পট ইনপুট ও সাবমিট
-              const inputSel = 'div.ql-editor[contenteditable="true"], div[role="textbox"], textarea';
-              await page.waitForSelector(inputSel, { timeout: 5000 });
+              await page.waitForSelector(inputSel, { state: 'visible', timeout: 5000 });
               await page.click(inputSel, { force: true });
               await page.keyboard.press('Control+a');
               await page.keyboard.press('Delete');
@@ -143,47 +114,36 @@ jobs:
               await page.waitForSelector(responseSel, { timeout: 15000 });
 
               let lastSentText = "";
-              let noChangeCounter = 0;
-
               while (true) {
-                await new Promise(r => setTimeout(r, 250));
+                await new Promise(r => setTimeout(r, 100)); // ১০০ মিলি-সেকেন্ড চেক স্পিড
                 const currentFullText = await page.evaluate((selector) => {
                   const el = document.querySelector(selector);
                   return el ? el.innerText.trim() : '';
                 }, responseSel);
 
                 if (currentFullText.length > lastSentText.length) {
-                  // রিয়েল-টাইমে ফায়ারবেস ডাটাবেসে নতুন টেক্সট চঙ্ক রাইট করা হচ্ছে
-                  await fetch(`${DB_URL}/gemini_stream/response.json`, {
-                    method: 'PUT',
-                    body: JSON.stringify({ text: currentFullText, status: "streaming" })
+                  const chunk = currentFullText.substring(lastSentText.length);
+                  // পুরো ডাটা না পাঠিয়ে শুধু নতুন ক্যারেক্টার টুকু ফায়ারবেস পুশ (POST) করবে ইনস্ট্যান্ট
+                  await fetch(`${DB_URL}/gemini_stream/chunks.json`, {
+                    method: 'POST',
+                    body: JSON.stringify({ c: chunk })
                   });
                   lastSentText = currentFullText;
-                  noChangeCounter = 0;
                 } else if (currentFullText.length > 0 && currentFullText.length === lastSentText.length) {
-                  noChangeCounter++;
                   const isFinished = await page.evaluate((selector) => {
                     const el = document.querySelector(selector);
                     return el ? (!el.innerHTML.includes('loading') && !el.innerHTML.includes('...')) : true;
                   }, responseSel);
-                  
-                  if (noChangeCounter > 4 && isFinished) break;
+                  if (isFinished) break;
                 }
               }
 
-              // জেনারেশন কমপ্লিট স্ট্যাটাস রাইট করা
-              await fetch(`${DB_URL}/gemini_stream/response.json`, {
-                method: 'PUT',
-                body: JSON.stringify({ text: lastSentText, status: "completed" })
-              });
-              console.log("✅ Task Complete! Response sent back to Firebase.");
+              // কাজ শেষ হলে স্ট্যাটাস ডান করা
+              await fetch(`${DB_URL}/gemini_stream/status.json`, { method: 'PUT', body: JSON.stringify("completed") });
+              console.log("✅ Stream Complete!");
 
             } catch (err) {
-              console.error(`❌ Task Error:`, err.message);
-              await fetch(`${DB_URL}/gemini_stream/response.json`, {
-                method: 'PUT',
-                body: JSON.stringify({ text: `Error: ${err.message}`, status: "failed" })
-              });
+              await fetch(`${DB_URL}/gemini_stream/status.json`, { method: 'PUT', body: JSON.stringify("failed") });
             } finally {
               if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
             }
@@ -191,34 +151,19 @@ jobs:
 
           async function startBridgeLoop() {
             await initGemini();
-            
-            // ডাটাবেস পোলিং লুপ (কোনো রিসোর্স ল্যাকিং ছাড়া প্রতি ১ সেকেন্ড পর পর রিকোয়েস্ট চেক করবে)
             while (true) {
               try {
                 const res = await fetch(`${DB_URL}/gemini_stream/request.json`);
                 const reqData = await res.json();
-
                 if (reqData && reqData.status === "pending") {
-                  console.log(`🚀 New Request Detected! Prompt: ${reqData.prompt.substring(0, 30)}...`);
-                  
-                  // স্ট্যাটাস প্রসেসিং করা যাতে ডাবল রান না হয়
-                  await fetch(`${DB_URL}/gemini_stream/request.json`, {
-                    method: 'PATCH',
-                    body: JSON.stringify({ status: "processing" })
-                  });
-
+                  await fetch(`${DB_URL}/gemini_stream/request.json`, { method: 'PATCH', body: JSON.stringify({ status: "processing" }) });
                   await processGeminiTask(reqData.prompt, reqData.image);
-
-                  // রিকোয়েস্ট ডাটা ক্লিয়ার করে দেওয়া যাতে লুপ বারবার ফায়ার না করে
                   await fetch(`${DB_URL}/gemini_stream/request.json`, { method: 'DELETE' });
                 }
-              } catch (e) {
-                console.error("Database loop error:", e.message);
-              }
+              } catch (e) {}
               await new Promise(r => setTimeout(r, 1000));
             }
           }
-
           startBridgeLoop();
           BRIDGE_EOF
 
