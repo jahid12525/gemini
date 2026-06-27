@@ -1,4 +1,4 @@
-name: 🚀 Gemini API Gateway via Tailscale Funnel (Fixed Syntax)
+name: 🚀 Gemini API Gateway via Tailscale Funnel (Final Fixed Syntax)
 
 on:
   workflow_dispatch:
@@ -197,9 +197,11 @@ jobs:
           echo "⚡ Connecting to Tailscale Network..."
           sudo tailscale up --authkey="$TAILSCALE_AUTH_KEY" --hostname="gemini-runner" --accept-dns=false
 
-          echo "🔀 Configuring New Tailscale Serve & Funnel Background Processes..."
-          # নতুন CLI সিনট্যাক্স: প্রথমে লোকাল পোর্টে ট্রাফিক রিডাইরেক্ট সেটআপ, তারপর পাবলিক ফানেল অন করা
-          sudo tailscale serve --bg http:3000
+          echo "🔀 Configuring Tailscale Serve Backend (Correct Syntax)..."
+          # ফিক্সড কমান্ড: ডিরেক্টলি লোকালহোস্ট স্কিম আর পোর্ট ডিফাইন করা
+          sudo tailscale serve --bg 3000
+
+          echo "🌐 Activating Global Funnel In Background..."
           sudo tailscale funnel --bg 443 on
 
           sleep 5
