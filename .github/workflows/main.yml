@@ -1,7 +1,12 @@
-name: 🚀 Gemini Persistent Profile API Gateway (Telegram Turbo)
+name: 🚀 Gemini Persistent Profile API Gateway (Telegram Turbo Original Method)
 
 on:
   workflow_dispatch:
+    inputs:
+      gemini_session:
+        description: "🌐 Gemini Web Session JSON (paste storageState JSON)"
+        required: false
+        default: ""
 
 jobs:
   run-api-gateway:
@@ -29,23 +34,12 @@ jobs:
           Xvfb :99 -screen 0 1920x1080x24 &
           sleep 2
           echo "DISPLAY=:99" >> $GITHUB_ENV
-
-      - name: 📂 Download & Extract Google Profile Securely
-        env:
-          DOWNLOAD_URL: ${{ secrets.PROFILE_DOWNLOAD_URL }}
-        run: |
-          if [ -z "$DOWNLOAD_URL" ]; then
-            echo "❌ Error: PROFILE_DOWNLOAD_URL secret is missing!"
-            exit 1
-          fi
-          wget -q -O gemini_profile.zip "$DOWNLOAD_URL"
-          unzip -q gemini_profile.zip -d ./
-          rm -f ./gemini_profile/SingletonLock ./gemini_profile/Lock ./gemini_profile/Google\ Profile\ Lock
-          rm -rf ./gemini_profile/Default/Cache/*
-          rm -f gemini_profile.zip
-          echo "✅ Google Profile Ready!"
+          echo "✅ Xvfb virtual display started on :99"
 
       - name: 🛠️ Launch Gemini Telegram Bridge Engine
+        env:
+          GEMINI_SESSION: ${{ secrets.GEMINI_SESSION }}
+          GEMINI_SESSION_INPUT: ${{ github.event.inputs.gemini_session }}
         run: |
           cat > telegram_bridge.mjs << 'TG_EOF'
           import fetch from 'node-fetch';
@@ -61,18 +55,71 @@ jobs:
           const CHAT_ID = "680349125";
           const TG_API = `https://api.telegram.org/bot${TOKEN}`;
           
+          const GEMINI_SESSION_RAW = (process.env.GEMINI_SESSION_INPUT?.trim() || process.env.GEMINI_SESSION || '').trim();
+          
+          if (!GEMINI_SESSION_RAW) {
+            console.error('❌ Error: GEMINI_SESSION secret or input is missing.');
+            process.exit(1);
+          }
+
+          // ─── COOKIE NORMALIZER (আপনার অরিজিনাল মেথড) ──────────────────────────────
+          function normalizeCookies(rawCookies) {
+            return rawCookies.map(c => {
+              let sameSite = 'None';
+              if (c.sameSite) {
+                const ss = c.sameSite.toLowerCase();
+                if (ss === 'lax')                               sameSite = 'Lax';
+                else if (ss === 'strict')                       sameSite = 'Strict';
+                else if (ss === 'none' || ss === 'no_restriction') sameSite = 'None';
+              }
+              const expires = c.expires   !== undefined ? Math.floor(c.expires) :
+                              c.expirationDate !== undefined ? Math.floor(c.expirationDate) :
+                              -1;
+              return {
+                name:     c.name,
+                value:    c.value,
+                domain:   c.domain,
+                path:     c.path || '/',
+                expires,
+                httpOnly: !!c.httpOnly,
+                secure:   !!c.secure,
+                sameSite,
+              };
+            });
+          }
+
+          let parsed = JSON.parse(GEMINI_SESSION_RAW);
+          let GEMINI_STORAGE_STATE = {
+            cookies: normalizeCookies(parsed.cookies || parsed),
+            origins: Array.isArray(parsed.origins) ? parsed.origins : []
+          };
+
+          const STORAGE_STATE_FILE = path.join(os.tmpdir(), 'gemini_storage_state.json');
+          fs.writeFileSync(STORAGE_STATE_FILE, JSON.stringify(GEMINI_STORAGE_STATE, null, 2));
+
           let context, page;
 
           async function initGemini() {
             try {
-              console.log("⚡ Launching Local Google Chrome Instance...");
+              console.log("⚡ Launching Local Google Chrome Instance using StorageState...");
               context = await chromium.launchPersistentContext('./gemini_profile', {
-                headless: false, channel: 'chrome',
-                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--disable-web-security', '--disable-gpu'],
-                viewport: { width: 1280, height: 800 }
+                headless: false,
+                channel: 'chrome',
+                args: [
+                  '--no-sandbox', '--disable-setuid-sandbox',
+                  '--disable-dev-shm-usage',
+                  '--disable-blink-features=AutomationControlled',
+                  '--disable-web-security',
+                  '--disable-features=IsolateOrigins,site-per-process'
+                ]
               });
+              
+              // আপনার মেথড অনুযায়ী স্টোরেজ স্টেট ফাইল লোড করা
+              await context.setStorageState({ path: STORAGE_STATE_FILE });
+
               page = await context.newPage();
-              await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded' });
+              await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 30000 });
+              
               console.log("✅ Gemini Browser Ready! Listening to Telegram Bot...");
               await sendTelegramMessage("🟢 Gemini Cloud Runner is Active & Ready!");
             } catch (err) { console.error("❌ Init failed:", err.message); process.exit(1); }
@@ -88,46 +135,58 @@ jobs:
 
           async function processGeminiTask(promptText, localImagePath) {
             try {
-              const inputSel = 'div.ql-editor[contenteditable="true"], div[role="textbox"], textarea';
-              await page.waitForSelector(inputSel, { state: 'visible', timeout: 10000 });
+              console.log('🌐 Opening fresh Gemini chat session...');
+              await page.goto('https://gemini.google.com/app/new', { waitUntil: 'domcontentloaded', timeout: 30000 });
+              await new Promise(r => setTimeout(r, 3000));
 
               try { await page.keyboard.press('Escape'); } catch(_) {}
-              const newChatBtnSel = 'a[href="/app/new"], button:has-text("New chat"), [aria-label="New chat"]';
-              const newChatBtn = await page.$(newChatBtnSel);
-              if (newChatBtn) {
-                await newChatBtn.click({ force: true });
-                await new Promise(r => setTimeout(r, 1500)); 
-              } else {
-                await page.goto('https://gemini.google.com/app', { waitUntil: 'commit' }); 
-                await new Promise(r => setTimeout(r, 2000));
-              }
-              try { await page.keyboard.press('Escape'); } catch(_) {}
 
-              // ইমেজ হ্যান্ডলিং
+              // ─── আপনার ইমেজ আপলোড মেথড (setInputFiles) ─────────────────────────────
               if (localImagePath && fs.existsSync(localImagePath)) {
-                const uploadBtnSelectors = ['button[aria-label="Open upload file menu"]', 'button[aria-label="Upload file"]', 'button[aria-label="Add image"]', 'button[aria-label="Attach files"]'];
+                console.log(`📎 Uploading image: ${path.basename(localImagePath)}`);
+                const uploadBtnSelectors = [
+                  'button[aria-label="Open upload file menu"]',
+                  'button[aria-label="Upload file"]',
+                  'button[aria-label="Add image"]',
+                  'button[aria-label="Attach files"]',
+                ];
+
                 let uploadBtnClicked = false;
                 for (const sel of uploadBtnSelectors) {
-                  try { const btn = await page.$(sel); if (btn) { await btn.click({ force: true }); uploadBtnClicked = true; break; } } catch (_) {}
+                  try {
+                    const btn = await page.$(sel);
+                    if (btn) { await btn.click(); uploadBtnClicked = true; break; }
+                  } catch (_) {}
                 }
+
                 if (uploadBtnClicked) {
-                  const fileInput = await page.waitForSelector('input[type="file"]', { state: 'attached', timeout: 5000 });
-                  if (fileInput) { await fileInput.setInputFiles(localImagePath); await new Promise(r => setTimeout(r, 1500)); }
+                  const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+                  if (fileInput) {
+                    await fileInput.setInputFiles(localImagePath);
+                    console.log('    ✅ Image attached successfully via native input');
+                    await new Promise(r => setTimeout(r, 1500));
+                  }
                 }
               }
 
-              // সাবমিট প্রম্পট
-              await page.waitForSelector(inputSel, { state: 'visible', timeout: 5000 });
+              // ─── আপনার টেক্সট ইনপুট ও সাবমিট মেথড ──────────────────────────────
+              console.log(`🌐 Sending prompt...`);
+              const inputSel = 'div.ql-editor[contenteditable="true"]';
+              await page.waitForSelector(inputSel, { timeout: 15000 });
               await page.click(inputSel, { force: true });
               await page.keyboard.press('Control+a');
               await page.keyboard.press('Delete');
-              await page.keyboard.insertText(promptText);
-              await page.keyboard.press('Enter');
+              await new Promise(r => setTimeout(r, 200));
 
+              await page.keyboard.insertText(promptText);
+              await new Promise(r => setTimeout(r, 500));
+              await page.keyboard.press('Enter');
+              console.log(`    ⌨️ Submitted via Enter key`);
+
+              // ─── রেসপন্স ট্র্যাকিং লজিক ──────────────────────────────────────────
               const responseSel = 'div[id^="model-response-message-content"], message-content, .message-content-inner';
               await page.waitForSelector(responseSel, { timeout: 15000 });
 
-              // টেলিগ্রামে টাইপিং স্ট্যাটাস পাঠানো
               const initialMsgRes = await fetch(`${TG_API}/sendMessage`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -137,35 +196,34 @@ jobs:
               const msgId = msgData.result.message_id;
 
               let lastSentText = "";
-              let updateCounter = 0;
+              let stableCount = 0;
 
               while (true) {
-                await new Promise(r => setTimeout(r, 400));
+                await new Promise(r => setTimeout(r, 1000));
                 const currentFullText = await page.evaluate((selector) => {
                   const el = document.querySelector(selector);
                   return el ? el.innerText.trim() : '';
                 }, responseSel);
 
                 if (currentFullText.length > lastSentText.length) {
-                  updateCounter++;
-                  if (updateCounter % 3 === 0 || currentFullText.length - lastSentText.length > 50) {
-                    await fetch(`${TG_API}/editMessageText`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ chat_id: CHAT_ID, message_id: msgId, text: currentFullText })
-                    }).catch(() => {});
-                    lastSentText = currentFullText;
-                  }
+                  await fetch(`${TG_API}/editMessageText`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_id: CHAT_ID, message_id: msgId, text: currentFullText })
+                  }).catch(() => {});
+                  lastSentText = currentFullText;
+                  stableCount = 0;
                 } else if (currentFullText.length > 0 && currentFullText.length === lastSentText.length) {
+                  stableCount++;
                   const isFinished = await page.evaluate((selector) => {
                     const el = document.querySelector(selector);
                     return el ? (!el.innerHTML.includes('loading') && !el.innerHTML.includes('...')) : true;
                   }, responseSel);
-                  if (isFinished) break;
+                  if (stableCount >= 2 && isFinished) break;
                 }
               }
 
-              // ফাইনাল রেসপন্স আপডেট
+              // ফাইনাল রেসপন্স পুশ
               await fetch(`${TG_API}/editMessageText`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -211,7 +269,7 @@ jobs:
                         fs.writeFileSync(localImagePath, buffer);
                       }
 
-                      if (promptText) {
+                      if (promptText && !promptText.startsWith('/start')) {
                         console.log(`🚀 Task Received via Telegram: ${promptText.substring(0, 30)}...`);
                         await processGeminiTask(promptText, localImagePath);
                       }
