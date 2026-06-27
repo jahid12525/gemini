@@ -1,4 +1,4 @@
-name: 🚀 Gemini API Gateway via Playit.gg (Ultra Fast Direct Binary)
+name: 🚀 Gemini API Gateway via Playit.gg (Bulletproof Fixed)
 
 on:
   workflow_dispatch:
@@ -193,16 +193,19 @@ jobs:
           curl -Lo playit https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-amd64
           chmod +x playit
 
-          # যদি আগে থেকেই গিটহাবে সিক্রেট কি থাকে তা ইনজেক্ট করা
+          # ফিক্সড: প্লে-ইট-এর ডিরেক্টরি আর সকেট আগে থেকেই ক্রিয়েট করে রাখা যাতে ক্র্যাশ না খায়
+          mkdir -p ~/.config/playit_gg
+          mkdir -p /tmp/playit_sockets
+
           if [ ! -z "${{ secrets.PLAYIT_SECRET_KEY }}" ]; then
             echo "📝 Injecting existing secret key..."
-            ./playit secret "${{ secrets.PLAYIT_SECRET_KEY }}" &
-          else
-            echo "⚠️ Generating fresh tunnel..."
-            ./playit > playit_raw_log.txt 2>&1 &
+            echo "secret_key = \"${{ secrets.PLAYIT_SECRET_KEY }}\"" > ~/.config/playit_gg/playit.toml
           fi
 
-          sleep 5
+          echo "⚠️ Launching tunnel engine..."
+          ./playit --secret-path ~/.config/playit_gg/playit.toml run > playit_raw_log.txt 2>&1 &
+
+          sleep 6
           if [ -f playit_raw_log.txt ]; then
             echo "=================================================="
             echo "🔥 LOOK HERE FOR YOUR CLAIM URL 🔥"
