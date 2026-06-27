@@ -1,4 +1,4 @@
-name: 🚀 Gemini API Gateway via Playit.gg (Permanent Fixed URL)
+name: 🚀 Gemini API Gateway via Playit.gg (Fixed Tunnel)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 📦 Setup Node.js Environment
-        uses: actions/setup-node@v4
+        uses: actions/setup-version@v4
         with:
           node-version: 20
 
@@ -46,22 +46,23 @@ jobs:
           rm -f gemini_profile.zip
           echo "✅ Google Profile Loaded Successfully!"
 
-      - name: 🧰 Install & Configure Playit.gg CLI
-        env:
-          PLAYIT_KEY: ${{ secrets.PLAYIT_SECRET_KEY }}
+      - name: 🧰 Install & Setup Playit.gg CLI (Correct Binary)
         run: |
           echo "📥 Downloading Playit.gg Linux CLI..."
           curl -SsL https://playit-cloud.github.io/ppa/key.gpg | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/playit.gpg
           echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit.list
           sudo apt-get update -y && sudo apt-get install playit -y
           
-          echo "📝 Writing Playit Configuration with Secret Key..."
+          # কাস্টম সিক্রেট কি যদি আগে থেকে সেভ করা থাকে তার জন্য ডিরেক্টরি ব্যাকআপ
           mkdir -p ~/.config/playit
-          cat > ~/.config/playit/playit.toml << EOF
-          secret_key = "$PLAYIT_KEY"
+          if [ ! -z "${{ secrets.PLAYIT_SECRET_KEY }}" ]; then
+            echo "📝 Found secret key, inject configuring..."
+            cat > ~/.config/playit/playit.toml << EOF
+            secret_key = "${{ secrets.PLAYIT_SECRET_KEY }}"
           EOF
-          
-          echo "✅ Playit CLI configured and ready."
+          else
+            echo "⚠️ No PLAYIT_SECRET_KEY found. Generating a new fresh claim URL..."
+          fi
 
       - name: 🛠️ Launch Gemini API Engine & Run Playit Tunnel
         run: |
@@ -206,6 +207,17 @@ jobs:
           });
           SERVER_EOF
 
-          # ব্যাকগ্রাউন্ডে প্লে-ইট টানেল এবং এক্সপ্রেস সার্ভার একসাথে রান করা
-          playit --no-gui &
+          # ফিক্সড কমান্ড: প্লে-ইট ব্যাকগ্রাউন্ডে রান করা (কোনো এরর ছাড়াই)
+          playit run > playit_log.txt 2>&1 &
+          
+          # ক্লেইম ইউআরএল জেনারেট হওয়ার জন্য ৩ সেকেন্ড পজ
+          sleep 3
+          
+          if [ -f playit_log.txt ]; then
+            echo "=================================================="
+            echo "🔥 LOOK HERE FOR YOUR CLAIM URL 🔥"
+            cat playit_log.txt | grep -o 'https://playit.gg/claim/[^ ]*' || cat playit_log.txt
+            echo "=================================================="
+          fi
+
           node api_server.mjs
