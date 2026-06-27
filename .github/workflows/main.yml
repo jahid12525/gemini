@@ -1,11 +1,11 @@
-name: 🚀 Gemini Persistent Profile API Gateway (Firebase Turbo)
+name: 🚀 Gemini Persistent Profile API Gateway (Telegram Turbo)
 
 on:
   workflow_dispatch:
 
 jobs:
   run-api-gateway:
-    name: 🌐 Launch Persistent API + Firebase Turbo Engine
+    name: 🌐 Launch Persistent Playwright + Telegram Bridge
     runs-on: ubuntu-latest
 
     steps:
@@ -34,6 +34,10 @@ jobs:
         env:
           DOWNLOAD_URL: ${{ secrets.PROFILE_DOWNLOAD_URL }}
         run: |
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "❌ Error: PROFILE_DOWNLOAD_URL secret is missing!"
+            exit 1
+          fi
           wget -q -O gemini_profile.zip "$DOWNLOAD_URL"
           unzip -q gemini_profile.zip -d ./
           rm -f ./gemini_profile/SingletonLock ./gemini_profile/Lock ./gemini_profile/Google\ Profile\ Lock
@@ -41,11 +45,9 @@ jobs:
           rm -f gemini_profile.zip
           echo "✅ Google Profile Ready!"
 
-      - name: 🛠️ Launch Gemini Firebase Bridge Engine
-        env:
-          FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
+      - name: 🛠️ Launch Gemini Telegram Bridge Engine
         run: |
-          cat > bridge.mjs << 'BRIDGE_EOF'
+          cat > telegram_bridge.mjs << 'TG_EOF'
           import fetch from 'node-fetch';
           import { chromium } from 'playwright-extra';
           import StealthPlugin from 'puppeteer-extra-plugin-stealth';
@@ -54,11 +56,16 @@ jobs:
           import path from 'path';
 
           chromium.use(StealthPlugin());
-          const DB_URL = process.env.FIREBASE_DB_URL.replace(/\/$/, "");
+          
+          const TOKEN = "8012635061:AAGThMwyRZDVPmzZuvyr--kA2kZUjy87dE4";
+          const CHAT_ID = "680349125";
+          const TG_API = `https://api.telegram.org/bot${TOKEN}`;
+          
           let context, page;
 
           async function initGemini() {
             try {
+              console.log("⚡ Launching Local Google Chrome Instance...");
               context = await chromium.launchPersistentContext('./gemini_profile', {
                 headless: false, channel: 'chrome',
                 args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--disable-web-security', '--disable-gpu'],
@@ -66,12 +73,20 @@ jobs:
               });
               page = await context.newPage();
               await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded' });
-              console.log("✅ Gemini Browser Ready! Listening...");
-            } catch (err) { process.exit(1); }
+              console.log("✅ Gemini Browser Ready! Listening to Telegram Bot...");
+              await sendTelegramMessage("🟢 Gemini Cloud Runner is Active & Ready!");
+            } catch (err) { console.error("❌ Init failed:", err.message); process.exit(1); }
           }
 
-          async function processGeminiTask(promptText, base64Image) {
-            let tempFilePath = null;
+          async function sendTelegramMessage(text) {
+            await fetch(`${TG_API}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: CHAT_ID, text: text })
+            });
+          }
+
+          async function processGeminiTask(promptText, localImagePath) {
             try {
               const inputSel = 'div.ql-editor[contenteditable="true"], div[role="textbox"], textarea';
               await page.waitForSelector(inputSel, { state: 'visible', timeout: 10000 });
@@ -88,10 +103,8 @@ jobs:
               }
               try { await page.keyboard.press('Escape'); } catch(_) {}
 
-              if (base64Image) {
-                tempFilePath = path.join(os.tmpdir(), `upload_${Date.now()}.jpg`);
-                fs.writeFileSync(tempFilePath, Buffer.from(base64Image, 'base64'));
-
+              // ইমেজ হ্যান্ডলিং
+              if (localImagePath && fs.existsSync(localImagePath)) {
                 const uploadBtnSelectors = ['button[aria-label="Open upload file menu"]', 'button[aria-label="Upload file"]', 'button[aria-label="Add image"]', 'button[aria-label="Attach files"]'];
                 let uploadBtnClicked = false;
                 for (const sel of uploadBtnSelectors) {
@@ -99,10 +112,11 @@ jobs:
                 }
                 if (uploadBtnClicked) {
                   const fileInput = await page.waitForSelector('input[type="file"]', { state: 'attached', timeout: 5000 });
-                  if (fileInput) { await fileInput.setInputFiles(tempFilePath); await new Promise(r => setTimeout(r, 1500)); }
+                  if (fileInput) { await fileInput.setInputFiles(localImagePath); await new Promise(r => setTimeout(r, 1500)); }
                 }
               }
 
+              // সাবমিট প্রম্পট
               await page.waitForSelector(inputSel, { state: 'visible', timeout: 5000 });
               await page.click(inputSel, { force: true });
               await page.keyboard.press('Control+a');
@@ -113,22 +127,35 @@ jobs:
               const responseSel = 'div[id^="model-response-message-content"], message-content, .message-content-inner';
               await page.waitForSelector(responseSel, { timeout: 15000 });
 
+              // টেলিগ্রামে টাইপিং স্ট্যাটাস পাঠানো
+              const initialMsgRes = await fetch(`${TG_API}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: CHAT_ID, text: "✍️ Gemini is typing..." })
+              });
+              const msgData = await initialMsgRes.json();
+              const msgId = msgData.result.message_id;
+
               let lastSentText = "";
+              let updateCounter = 0;
+
               while (true) {
-                await new Promise(r => setTimeout(r, 100)); // ১০০ মিলি-সেকেন্ড চেক স্পিড
+                await new Promise(r => setTimeout(r, 400));
                 const currentFullText = await page.evaluate((selector) => {
                   const el = document.querySelector(selector);
                   return el ? el.innerText.trim() : '';
                 }, responseSel);
 
                 if (currentFullText.length > lastSentText.length) {
-                  const chunk = currentFullText.substring(lastSentText.length);
-                  // পুরো ডাটা না পাঠিয়ে শুধু নতুন ক্যারেক্টার টুকু ফায়ারবেস পুশ (POST) করবে ইনস্ট্যান্ট
-                  await fetch(`${DB_URL}/gemini_stream/chunks.json`, {
-                    method: 'POST',
-                    body: JSON.stringify({ c: chunk })
-                  });
-                  lastSentText = currentFullText;
+                  updateCounter++;
+                  if (updateCounter % 3 === 0 || currentFullText.length - lastSentText.length > 50) {
+                    await fetch(`${TG_API}/editMessageText`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ chat_id: CHAT_ID, message_id: msgId, text: currentFullText })
+                    }).catch(() => {});
+                    lastSentText = currentFullText;
+                  }
                 } else if (currentFullText.length > 0 && currentFullText.length === lastSentText.length) {
                   const isFinished = await page.evaluate((selector) => {
                     const el = document.querySelector(selector);
@@ -138,33 +165,65 @@ jobs:
                 }
               }
 
-              // কাজ শেষ হলে স্ট্যাটাস ডান করা
-              await fetch(`${DB_URL}/gemini_stream/status.json`, { method: 'PUT', body: JSON.stringify("completed") });
-              console.log("✅ Stream Complete!");
+              // ফাইনাল রেসপন্স আপডেট
+              await fetch(`${TG_API}/editMessageText`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: CHAT_ID, message_id: msgId, text: lastSentText })
+              }).catch(() => {});
 
             } catch (err) {
-              await fetch(`${DB_URL}/gemini_stream/status.json`, { method: 'PUT', body: JSON.stringify("failed") });
+              await sendTelegramMessage(`❌ Task Error: ${err.message}`);
             } finally {
-              if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+              if (localImagePath && fs.existsSync(localImagePath)) fs.unlinkSync(localImagePath);
             }
           }
 
-          async function startBridgeLoop() {
+          async function startTelegramPolling() {
             await initGemini();
+            let lastUpdateId = 0;
+
             while (true) {
               try {
-                const res = await fetch(`${DB_URL}/gemini_stream/request.json`);
-                const reqData = await res.json();
-                if (reqData && reqData.status === "pending") {
-                  await fetch(`${DB_URL}/gemini_stream/request.json`, { method: 'PATCH', body: JSON.stringify({ status: "processing" }) });
-                  await processGeminiTask(reqData.prompt, reqData.image);
-                  await fetch(`${DB_URL}/gemini_stream/request.json`, { method: 'DELETE' });
+                const res = await fetch(`${TG_API}/getUpdates?offset=${lastUpdateId + 1}&timeout=10`);
+                const update = await res.json();
+                
+                if (update.result && update.result.length > 0) {
+                  for (const msgObj of update.result) {
+                    lastUpdateId = msgObj.update_id;
+                    const message = msgObj.message;
+                    
+                    if (message && String(message.chat.id) === String(CHAT_ID)) {
+                      let promptText = message.text || message.caption || "";
+                      let localImagePath = null;
+
+                      if (message.photo) {
+                        const fileId = message.photo[message.photo.length - 1].file_id;
+                        const fileRes = await fetch(`${TG_API}/getFile?file_id=${fileId}`);
+                        const fileData = await fileRes.json();
+                        const filePath = fileData.result.file_path;
+                        
+                        const downloadUrl = `https://api.telegram.org/file/bot${TOKEN}/${filePath}`;
+                        const imgRes = await fetch(downloadUrl);
+                        const buffer = await imgRes.buffer();
+                        
+                        localImagePath = path.join(os.tmpdir(), `tg_upload_${Date.now()}.jpg`);
+                        fs.writeFileSync(localImagePath, buffer);
+                      }
+
+                      if (promptText) {
+                        console.log(`🚀 Task Received via Telegram: ${promptText.substring(0, 30)}...`);
+                        await processGeminiTask(promptText, localImagePath);
+                      }
+                    }
+                  }
                 }
-              } catch (e) {}
-              await new Promise(r => setTimeout(r, 1000));
+              } catch (e) { console.error("Polling error:", e.message); }
+              await new Promise(r => setTimeout(r, 500));
             }
           }
-          startBridgeLoop();
-          BRIDGE_EOF
 
-          node bridge.mjs
+          startTelegramPolling();
+          TG_EOF
+
+          node telegram_bridge.mjs
