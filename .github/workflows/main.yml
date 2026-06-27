@@ -1,0 +1,209 @@
+name: 🚀 Universal Curl-based Gemini API Gateway
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-api-gateway:
+    name: 🌐 Launch Persistent Playwright API Server
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📦 Checkout Repository Code
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js Environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 📥 Install System & Node Dependencies
+        run: |
+          npm init -y
+          npm install node-fetch@3 playwright playwright-extra puppeteer-extra-plugin-stealth express localtunnel
+          npx playwright install chrome --with-deps
+
+      - name: 🖥️ Start Virtual Display (Xvfb)
+        run: |
+          sudo apt-get install -y xvfb
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+          echo "✅ Xvfb virtual display started on :99"
+
+      - name: 📂 Download & Extract Google Profile Securely
+        env:
+          DOWNLOAD_URL: ${{ secrets.PROFILE_DOWNLOAD_URL }}
+        run: |
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "❌ Error: PROFILE_DOWNLOAD_URL secret is missing!"
+            exit 1
+          fi
+          wget -q -O gemini_profile.zip "$DOWNLOAD_URL"
+          unzip -q gemini_profile.zip -d ./
+          rm -f ./gemini_profile/SingletonLock ./gemini_profile/Lock ./gemini_profile/Google\ Profile\ Lock
+          rm -rf ./gemini_profile/Default/Cache/*
+          rm -f gemini_profile.zip
+          echo "✅ Google Profile Loaded Successfully!"
+
+      - name: 🛠️ Launch Gemini API Engine & Tunnel
+        run: |
+          cat > api_server.mjs << 'SERVER_EOF'
+          import express from 'express';
+          import localtunnel from 'localtunnel';
+          import { chromium } from 'playwright-extra';
+          import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+          import fs from 'fs';
+          import os from 'os';
+          import path from 'path';
+
+          chromium.use(StealthPlugin());
+          
+          const app = express();
+          app.use(express.json({ limit: '50mb' }));
+          
+          let context, page;
+          const PORT = 3000;
+
+          function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+          // জেমিনি ব্রাউজার ইনিশিয়েশন
+          async function initGemini() {
+            console.log("⚡ Launching Local Google Chrome Instance...");
+            context = await chromium.launchPersistentContext('./gemini_profile', {
+              headless: false,
+              channel: 'chrome',
+              args: [
+                '--no-sandbox', '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process'
+              ]
+            });
+            page = await context.newPage();
+            await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 40000 });
+            console.log("✅ Gemini Web Interface Is Active inside Runner!");
+          }
+
+          // ইউনিভার্সাল কার্ল এন্ডপয়েন্ট
+          app.post('/api/gemini', async (req, res) => {
+            const { prompt, image_base64 } = req.body;
+            if (!prompt) return res.status(400).json({ error: "Prompt is required" });
+
+            console.log(`📩 New Request Received! Prompt: ${prompt.substring(0, 30)}...`);
+            let localImagePath = null;
+
+            try {
+              // চ্যাট স্ক্রিন ওভারলে ক্লিয়ারেন্স
+              try { await page.keyboard.press('Escape'); } catch (_) {}
+
+              // ইমেজ হ্যান্ডলিং (Base64 ডিকোড করে ডিরেক্ট ইনপুট)
+              if (image_base64) {
+                const buffer = Buffer.from(image_base64.replace(/^data:image\/\w+;base64,/, ""), 'base64');
+                localImagePath = path.join(os.tmpdir(), `upload_${Date.now()}.jpg`);
+                fs.writeFileSync(localImagePath, buffer);
+
+                const uploadBtnSelectors = [
+                  'button[aria-label="Open upload file menu"]',
+                  'button[aria-label="Upload file"]',
+                  'button[aria-label="Add image"]',
+                  'button[aria-label="Attach files"]',
+                ];
+
+                let uploadBtnClicked = false;
+                for (const sel of uploadBtnSelectors) {
+                  try { const btn = await page.$(sel); if (btn) { await btn.click(); uploadBtnClicked = true; break; } } catch (_) {}
+                }
+
+                if (uploadBtnClicked) {
+                  const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+                  if (fileInput) {
+                    await fileInput.setInputFiles(localImagePath);
+                    await sleep(1500);
+                  }
+                }
+              }
+
+              // টেক্সট ইনপুট ও সাবমিট (আপনার অরিজিনাল টেস্টেড মেথড)
+              const inputSel = 'div.ql-editor[contenteditable="true"]';
+              await page.waitForSelector(inputSel, { timeout: 15000 });
+              await page.click(inputSel, { force: true });
+              await page.keyboard.press('Control+a');
+              await page.keyboard.press('Delete');
+              await sleep(200);
+
+              const getResponseCount = () => page.evaluate(() => {
+                return document.querySelectorAll('div[id^="model-response-message-content"], message-content, div.message-content').size || document.querySelectorAll('message-content').length;
+              }).catch(() => 0);
+
+              const initialCount = await getResponseCount();
+
+              await page.keyboard.insertText(prompt);
+              await sleep(500);
+              await page.keyboard.press('Enter');
+
+              // রেসপন্স জেনারেট হওয়া পর্যন্ত হোল্ড করার পিওর লজিক
+              const deadline = Date.now() + 90000;
+              let finalResponseText = '';
+              let lastSeenText = '';
+              let stableCount = 0;
+
+              while (Date.now() < deadline) {
+                await sleep(1500);
+                
+                const latestText = await page.evaluate(() => {
+                  const selectors = ['div[id^="model-response-message-content"]', 'message-content', 'div.message-content'];
+                  const allMatching = [];
+                  for (const sel of selectors) { document.querySelectorAll(sel).forEach(el => allMatching.push(el)); }
+                  if (allMatching.length === 0) return '';
+                  allMatching.sort((a, b) => (a.compareDocumentPosition(b) & 4) ? -1 : 1);
+                  const lastEl = allMatching[allMatching.length - 1];
+                  return lastEl ? (lastEl.innerText || lastEl.textContent || '').trim() : '';
+                }).catch(() => '');
+
+                if (!latestText) continue;
+
+                if (latestText === lastSeenText) {
+                  stableCount++;
+                  const isFinished = await page.evaluate(() => {
+                    const el = document.querySelector('message-content, div[id^="model-response-message-content"]');
+                    return el ? (!el.innerHTML.includes('loading') && !el.innerHTML.includes('...')) : true;
+                  }).catch(() => true);
+
+                  if (stableCount >= 2 && isFinished) {
+                    finalResponseText = latestText;
+                    break;
+                  }
+                } else {
+                  lastSeenText = latestText;
+                  stableCount = 0;
+                }
+              }
+
+              // সাকসেসফুলি কার্ল রিকোয়েস্টে রেসপন্স ব্যাক করা
+              res.json({ success: true, response: finalResponseText || lastSeenText });
+
+            } catch (err) {
+              res.status(500).json({ success: false, error: err.message });
+            } finally {
+              if (localImagePath && fs.existsSync(localImagePath)) fs.unlinkSync(localImagePath);
+            }
+          });
+
+          // সার্ভার এবং গ্লোবাল পাবলিক টানেল স্টার্ট
+          app.listen(PORT, async () => {
+            await initGemini();
+            console.log(`🤖 Local API Server running on port ${PORT}`);
+            
+            // লোকালটানেল দিয়ে ইনস্ট্যান্ট পাবলিক আইপি তৈরি
+            const tunnel = await localtunnel({ port: PORT });
+            console.log(`\n==================================================`);
+            console.log(`🚀 YOUR UNIVERSAL API URL: ${tunnel.url}`);
+            console.log(`==================================================\n`);
+            
+            tunnel.on('close', () => { console.log("Tunnel closed"); });
+          });
+          SERVER_EOF
+
+          node api_server.mjs
