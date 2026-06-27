@@ -1,4 +1,4 @@
-name: 🚀 Gemini API Gateway via Playit.gg (Fixed Actions)
+name: 🚀 Gemini API Gateway via Playit.gg (Final Fixed Command)
 
 on:
   workflow_dispatch:
@@ -206,11 +206,11 @@ jobs:
           });
           SERVER_EOF
 
-          # প্লে-ইট রান করা
-          playit run > playit_log.txt 2>&1 &
+          # ফিক্সড ও কারেক্ট কমান্ড: সাবকমান্ড ছাড়া ডিরেক্ট এজেন্ট রান করা
+          playit > playit_log.txt 2>&1 &
           
-          # ক্লেইম কোড জেনারেট হতে ৫ সেকেন্ড বিরতি
-          sleep 5
+          # ক্লেইম কোড প্রসেস হতে ৭ সেকেন্ড টাইম দেওয়া
+          sleep 7
           
           if [ -f playit_log.txt ]; then
             echo "=================================================="
