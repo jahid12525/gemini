@@ -1,4 +1,4 @@
-name: 🚀 Gemini API Gateway via ngrok (100% Fixed Binary Method)
+name: 🚀 Gemini API Gateway via ngrok
 
 on:
   workflow_dispatch:
@@ -15,23 +15,24 @@ jobs:
       - name: 📦 Setup Node.js Environment
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 20
 
       - name: 📥 Install Node Dependencies
         run: |
           npm init -y
-          npm install node-fetch@3 playwright playwright-extra puppeteer-extra-plugin-stealth express
+          npm install node-fetch@3 playwright express
           npx playwright install chrome --with-deps
 
       - name: 🖥️ Start Virtual Display (Xvfb)
         run: |
+          sudo apt-get update
           sudo apt-get install -y xvfb
-          Xvfb :99 -screen 0 1920x1080x24 &
-          sleep 2
+          Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
+          sleep 3
           echo "DISPLAY=:99" >> $GITHUB_ENV
           echo "✅ Xvfb virtual display started on :99"
 
-      - name: 📂 Download & Extract Google Profile Securely
+      - name: 📂 Download & Extract Google Profile
         env:
           DOWNLOAD_URL: ${{ secrets.PROFILE_DOWNLOAD_URL }}
         run: |
@@ -39,9 +40,9 @@ jobs:
             echo "❌ Error: PROFILE_DOWNLOAD_URL secret is missing!"
             exit 1
           fi
-          wget -q -O gemini_profile.zip "$DOWNLOAD_URL"
+          wget -q -O gemini_profile.zip "$DOWNLOAD_URL" || { echo "Failed to download profile"; exit 1; }
           unzip -q gemini_profile.zip -d ./
-          rm -f ./gemini_profile/SingletonLock ./gemini_profile/Lock ./gemini_profile/Google\ Profile\ Lock
+          rm -f ./gemini_profile/SingletonLock ./gemini_profile/Lock
           rm -rf ./gemini_profile/Default/Cache/*
           rm -f gemini_profile.zip
           echo "✅ Google Profile Loaded Successfully!"
@@ -49,17 +50,15 @@ jobs:
       - name: 🛠️ Launch Gemini API Engine & Start ngrok Tunnel
         env:
           NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+          DISPLAY: :99
         run: |
           cat > api_server.mjs << 'SERVER_EOF'
           import express from 'express';
-          import { chromium } from 'playwright-extra';
-          import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+          import { chromium } from 'playwright';
           import fs from 'fs';
           import os from 'os';
           import path from 'path';
 
-          chromium.use(StealthPlugin());
-          
           const app = express();
           app.use(express.json({ limit: '50mb' }));
           
@@ -70,20 +69,25 @@ jobs:
 
           async function initGemini() {
             console.log("⚡ Launching Local Google Chrome Instance...");
-            context = await chromium.launchPersistentContext('./gemini_profile', {
-              headless: false,
-              channel: 'chrome',
-              args: [
-                '--no-sandbox', '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process'
-              ]
-            });
-            page = await context.newPage();
-            await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 40000 });
-            console.log("✅ Gemini Web Interface Is Active inside Runner!");
+            try {
+              context = await chromium.launchPersistentContext('./gemini_profile', {
+                headless: false,
+                channel: 'chrome',
+                args: [
+                  '--no-sandbox',
+                  '--disable-setuid-sandbox',
+                  '--disable-dev-shm-usage',
+                  '--disable-blink-features=AutomationControlled',
+                  '--disable-web-security'
+                ]
+              });
+              page = await context.newPage();
+              await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 40000 });
+              console.log("✅ Gemini Web Interface Is Active!");
+            } catch (err) {
+              console.error("❌ Failed to initialize Gemini:", err.message);
+              process.exit(1);
+            }
           }
 
           app.post('/api/gemini', async (req, res) => {
@@ -108,30 +112,31 @@ jobs:
                   'button[aria-label="Attach files"]',
                 ];
 
-                let uploadBtnClicked = false;
                 for (const sel of uploadBtnSelectors) {
-                  try { const btn = await page.$(sel); if (btn) { await btn.click(); uploadBtnClicked = true; break; } } catch (_) {}
+                  try {
+                    const btn = await page.$(sel);
+                    if (btn) {
+                      await btn.click();
+                      break;
+                    }
+                  } catch (_) {}
                 }
 
-                if (uploadBtnClicked) {
+                try {
                   const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
                   if (fileInput) {
                     await fileInput.setInputFiles(localImagePath);
                     await sleep(1500);
                   }
-                }
+                } catch (_) {}
               }
 
               const inputSel = 'div.ql-editor[contenteditable="true"]';
               await page.waitForSelector(inputSel, { timeout: 15000 });
-              await page.click(inputSel, { force: true });
+              await page.click(inputSel);
               await page.keyboard.press('Control+a');
               await page.keyboard.press('Delete');
               await sleep(200);
-
-              const getResponseCount = () => page.evaluate(() => {
-                return document.querySelectorAll('div[id^="model-response-message-content"], message-content, div.message-content').length;
-              }).catch(() => 0);
 
               await page.keyboard.insertText(prompt);
               await sleep(500);
@@ -143,15 +148,15 @@ jobs:
               let stableCount = 0;
 
               while (Date.now() < deadline) {
-                await sleep(1500);
+                await sleep(2000);
                 
                 const latestText = await page.evaluate(() => {
                   const selectors = ['div[id^="model-response-message-content"]', 'message-content', 'div.message-content'];
-                  const allMatching = [];
-                  for (const sel of selectors) { document.querySelectorAll(sel).forEach(el => allMatching.push(el)); }
-                  if (allMatching.length === 0) return '';
-                  allMatching.sort((a, b) => (a.compareDocumentPosition(b) & 4) ? -1 : 1);
-                  const lastEl = allMatching[allMatching.length - 1];
+                  let lastEl = null;
+                  for (const sel of selectors) {
+                    const els = document.querySelectorAll(sel);
+                    if (els.length > 0) lastEl = els[els.length - 1];
+                  }
                   return lastEl ? (lastEl.innerText || lastEl.textContent || '').trim() : '';
                 }).catch(() => '');
 
@@ -159,12 +164,7 @@ jobs:
 
                 if (latestText === lastSeenText) {
                   stableCount++;
-                  const isFinished = await page.evaluate(() => {
-                    const el = document.querySelector('message-content, div[id^="model-response-message-content"]');
-                    return el ? (!el.innerHTML.includes('loading') && !el.innerHTML.includes('...')) : true;
-                  }).catch(() => true);
-
-                  if (stableCount >= 2 && isFinished) {
+                  if (stableCount >= 2) {
                     finalResponseText = latestText;
                     break;
                   }
@@ -177,9 +177,12 @@ jobs:
               res.json({ success: true, response: finalResponseText || lastSeenText });
 
             } catch (err) {
+              console.error("Error processing request:", err);
               res.status(500).json({ success: false, error: err.message });
             } finally {
-              if (localImagePath && fs.existsSync(localImagePath)) fs.unlinkSync(localImagePath);
+              if (localImagePath && fs.existsSync(localImagePath)) {
+                try { fs.unlinkSync(localImagePath); } catch (_) {}
+              }
             }
           });
 
@@ -189,24 +192,30 @@ jobs:
           });
           SERVER_EOF
 
-          echo "📥 Downloading ngrok Linux Binary directly..."
-          # ওএস ডিস্ট্রিবিউশন এড়াতে ডিরেক্ট লিনাক্স বাইনারি ডাউনলোড ও ইনস্টল
-          wget -q https://bin.equinox.io/c/bPf36xmqYQe/ngrok-stable-linux-amd64.zip
-          unzip -q ngrok-stable-linux-amd64.zip
-          sudo mv ngrok /usr/local/bin/
-          rm -f ngrok-stable-linux-amd64.zip
-          echo "✅ ngrok Binary Installed Successfully!"
+          echo "📥 Installing ngrok..."
+          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null && \
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list && \
+          sudo apt-get update && \
+          sudo apt-get install -y ngrok || {
+            echo "Fallback: Installing ngrok from binary..."
+            wget -q https://bin.equinox.io/c/bPf36xmqYQe/ngrok-stable-linux-amd64.zip
+            unzip -q ngrok-stable-linux-amd64.zip
+            sudo mv ngrok /usr/local/bin/
+            rm -f ngrok-stable-linux-amd64.zip
+          }
+          echo "✅ ngrok Installed Successfully!"
 
           echo "⚡ Configuring ngrok Token..."
           ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
 
           echo "🌐 Starting ngrok Tunnel on Port 3000..."
-          ngrok http 127.0.0.1:3000 --log=stdout > ngrok.log &
+          ngrok http 127.0.0.1:3000 --log=stdout > ngrok.log 2>&1 &
+          NGROK_PID=$!
           
-          sleep 5
+          sleep 6
           echo "=============================================="
           echo "🔗 YOUR NGROK PUBLIC TUNNEL URL: 🔗"
-          curl -s http://127.0.0.1:4040/api/tunnels | json_pp | grep public_url
+          curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | cut -d'"' -f4 || echo "URL not yet available"
           echo "=============================================="
 
           node api_server.mjs
