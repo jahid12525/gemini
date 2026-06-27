@@ -1,4 +1,4 @@
-name: 🚀 Gemini API Gateway via Playit.gg (Final Fixed Command)
+name: 🚀 Gemini API Gateway via Playit.gg (Permanent Fixed URL)
 
 on:
   workflow_dispatch:
@@ -46,24 +46,26 @@ jobs:
           rm -f gemini_profile.zip
           echo "✅ Google Profile Loaded Successfully!"
 
-      - name: 🧰 Install & Setup Playit.gg CLI (Correct Binary)
+      - name: 🧰 Install & Setup Playit.gg CLI (System Service Model)
         run: |
           echo "📥 Downloading Playit.gg Linux CLI..."
           curl -SsL https://playit-cloud.github.io/ppa/key.gpg | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/playit.gpg
           echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit.list
           sudo apt-get update -y && sudo apt-get install playit -y
           
-          mkdir -p ~/.config/playit
+          # যদি আগে থেকেই গিটহাবে সিক্রেট কি থাকে, তবে সেটা সিস্টেম সার্ভিস ফোল্ডারে পুশ করা
           if [ ! -z "${{ secrets.PLAYIT_SECRET_KEY }}" ]; then
-            echo "📝 Found secret key, configuring..."
-            cat > ~/.config/playit/playit.toml << EOF
+            echo "📝 Found secret key, injecting into system service configuration..."
+            sudo mkdir -p /etc/playit
+            sudo cat > /etc/playit/playit.toml << EOF
             secret_key = "${{ secrets.PLAYIT_SECRET_KEY }}"
           EOF
+            sudo systemctl restart playit
           else
-            echo "⚠️ No PLAYIT_SECRET_KEY found. Generating a new fresh claim URL..."
+            echo "⚠️ No PLAYIT_SECRET_KEY found. System service will generate a fresh claim URL..."
           fi
 
-      - name: 🛠️ Launch Gemini API Engine & Run Playit Tunnel
+      - name: 🛠️ Launch Gemini API Engine & Print Playit Claim URL
         run: |
           cat > api_server.mjs << 'SERVER_EOF'
           import express from 'express';
@@ -206,17 +208,11 @@ jobs:
           });
           SERVER_EOF
 
-          # ফিক্সড ও কারেক্ট কমান্ড: সাবকমান্ড ছাড়া ডিরেক্ট এজেন্ট রান করা
-          playit > playit_log.txt 2>&1 &
-          
-          # ক্লেইম কোড প্রসেস হতে ৭ সেকেন্ড টাইম দেওয়া
-          sleep 7
-          
-          if [ -f playit_log.txt ]; then
-            echo "=================================================="
-            echo "🔥 LOOK HERE FOR YOUR CLAIM URL 🔥"
-            cat playit_log.txt | grep -o 'https://playit.gg/claim/[^ ]*' || cat playit_log.txt
-            echo "=================================================="
-          fi
+          # ব্যাকগ্রাউন্ড সার্ভিসের ক্লেইম লিংক প্রিন্ট করার জন্য সেফটি পজ
+          sleep 6
+          echo "=================================================="
+          echo "🔥 LOOK HERE FOR YOUR CLAIM URL 🔥"
+          sudo journalctl -u playit --no-pager | grep -o 'https://playit.gg/claim/[^ ]*' || sudo systemctl status playit --no-pager
+          echo "=================================================="
 
           node api_server.mjs
