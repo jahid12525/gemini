@@ -1,4 +1,4 @@
-name: 🚀 Gemini API Gateway via Tailscale Funnel (Final Fixed Syntax)
+name: 🚀 Gemini API Gateway via Tailscale Funnel (100% Fixed Syntax)
 
 on:
   workflow_dispatch:
@@ -195,19 +195,19 @@ jobs:
           curl -fsSL https://tailscale.com/install.sh | sh
 
           echo "⚡ Connecting to Tailscale Network..."
-          sudo tailscale up --authkey="$TAILSCALE_AUTH_KEY" --hostname="gemini-runner" --accept-dns=false
+          sudo tailscale up --authkey="$TAILSCALE_AUTH_KEY" --hostname="gemini-runner-2" --accept-dns=false
 
-          echo "🔀 Configuring Tailscale Serve Backend (Correct Syntax)..."
-          # ফিক্সড কমান্ড: ডিরেক্টলি লোকালহোস্ট স্কিম আর পোর্ট ডিফাইন করা
+          echo "🔀 Configuring Tailscale Serve Backend..."
           sudo tailscale serve --bg 3000
 
           echo "🌐 Activating Global Funnel In Background..."
-          sudo tailscale funnel --bg 443 on
+          # নতুন CLI আপডেট অনুযায়ী একদম পারফেক্ট অন করার সিনট্যাক্স
+          sudo tailscale funnel --bg on
 
           sleep 5
           echo "=================================================="
-          echo "🚀 YOUR FIXED TAILSCALE FUNNEL ENDPOINT 🚀"
-          echo "👉 https://gemini-runner.tailfa2b7b.ts.net/api/gemini"
+          echo "🚀 YOUR BULLETPROOF TAILSCALE ENDPOINT 🚀"
+          echo "👉 https://gemini-runner-2.tailfa2b7b.ts.net/api/gemini"
           echo "=================================================="
 
           node api_server.mjs
