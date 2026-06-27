@@ -1,4 +1,4 @@
-name: 🚀 Gemini API Gateway via Tailscale Funnel
+name: 🚀 Gemini API Gateway via Tailscale Funnel (Fixed Syntax)
 
 on:
   workflow_dispatch:
@@ -195,15 +195,17 @@ jobs:
           curl -fsSL https://tailscale.com/install.sh | sh
 
           echo "⚡ Connecting to Tailscale Network..."
-          sudo tailscale up --authkey="$TAILSCALE_AUTH_KEY" --hostname="gemini-runner"
+          sudo tailscale up --authkey="$TAILSCALE_AUTH_KEY" --hostname="gemini-runner" --accept-dns=false
 
-          echo "🔀 Configuring Tailscale Funnel for Port 3000..."
-          sudo tailscale funnel 3000 on &
+          echo "🔀 Configuring New Tailscale Serve & Funnel Background Processes..."
+          # নতুন CLI সিনট্যাক্স: প্রথমে লোকাল পোর্টে ট্রাফিক রিডাইরেক্ট সেটআপ, তারপর পাবলিক ফানেল অন করা
+          sudo tailscale serve --bg http:3000
+          sudo tailscale funnel --bg 443 on
 
           sleep 5
           echo "=================================================="
           echo "🚀 YOUR FIXED TAILSCALE FUNNEL ENDPOINT 🚀"
-          sudo tailscale status --json | grep -o '"DNSName": "[^"]*' || echo "Check your Tailscale Admin Console for the Funnel URL!"
+          echo "👉 https://gemini-runner.tailfa2b7b.ts.net/api/gemini"
           echo "=================================================="
 
           node api_server.mjs
