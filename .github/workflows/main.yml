@@ -201,12 +201,12 @@ jobs:
           sudo tailscale serve --bg 3000
 
           echo "🌐 Activating Global Funnel In Background..."
-          # নতুন CLI আপডেট অনুযায়ী একদম পারফেক্ট অন করার সিনট্যাক্স
-          sudo tailscale funnel --bg on
+          # আল্টিমেট নিখুঁত সিনট্যাক্স: স্কিম সহ পোর্ট ও স্টেট একসাথে পাস করা
+          sudo tailscale funnel --bg https:443 on
 
           sleep 5
           echo "=================================================="
-          echo "🚀 YOUR BULLETPROOF TAILSCALE ENDPOINT 🚀"
+          echo "🚀 YOUR FIXED TAILSCALE ENDPOINT 🚀"
           echo "👉 https://gemini-runner-2.tailfa2b7b.ts.net/api/gemini"
           echo "=================================================="
 
