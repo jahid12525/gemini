@@ -1,11 +1,11 @@
-name: 🚀 Gemini API Gateway via Playit.gg (Bulletproof Fixed)
+name: 🚀 Gemini API Gateway via Tailscale Funnel
 
 on:
   workflow_dispatch:
 
 jobs:
   run-api-gateway:
-    name: 🌐 Launch Persistent Playwright API Server + Playit Tunnel
+    name: 🌐 Launch Persistent Playwright API Server + Tailscale Bridge
     runs-on: ubuntu-latest
 
     steps:
@@ -17,7 +17,7 @@ jobs:
         with:
           node-version: 20
 
-      - name: 📥 Install System & Node Dependencies
+      - name: 📥 Install Node Dependencies
         run: |
           npm init -y
           npm install node-fetch@3 playwright playwright-extra puppeteer-extra-plugin-stealth express
@@ -46,7 +46,9 @@ jobs:
           rm -f gemini_profile.zip
           echo "✅ Google Profile Loaded Successfully!"
 
-      - name: 🛠️ Launch Gemini API Engine & Print Playit Claim URL
+      - name: 🛠️ Launch Gemini API Engine & Start Tailscale Funnel
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           cat > api_server.mjs << 'SERVER_EOF'
           import express from 'express';
@@ -189,28 +191,19 @@ jobs:
           });
           SERVER_EOF
 
-          echo "📥 Downloading Raw Playit Binary..."
-          curl -Lo playit https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-amd64
-          chmod +x playit
+          echo "📥 Installing Tailscale Daemon..."
+          curl -fsSL https://tailscale.com/install.sh | sh
 
-          # ফিক্সড: প্লে-ইট-এর ডিরেক্টরি আর সকেট আগে থেকেই ক্রিয়েট করে রাখা যাতে ক্র্যাশ না খায়
-          mkdir -p ~/.config/playit_gg
-          mkdir -p /tmp/playit_sockets
+          echo "⚡ Connecting to Tailscale Network..."
+          sudo tailscale up --authkey="$TAILSCALE_AUTH_KEY" --hostname="gemini-runner"
 
-          if [ ! -z "${{ secrets.PLAYIT_SECRET_KEY }}" ]; then
-            echo "📝 Injecting existing secret key..."
-            echo "secret_key = \"${{ secrets.PLAYIT_SECRET_KEY }}\"" > ~/.config/playit_gg/playit.toml
-          fi
+          echo "🔀 Configuring Tailscale Funnel for Port 3000..."
+          sudo tailscale funnel 3000 on &
 
-          echo "⚠️ Launching tunnel engine..."
-          ./playit --secret-path ~/.config/playit_gg/playit.toml run > playit_raw_log.txt 2>&1 &
-
-          sleep 6
-          if [ -f playit_raw_log.txt ]; then
-            echo "=================================================="
-            echo "🔥 LOOK HERE FOR YOUR CLAIM URL 🔥"
-            cat playit_raw_log.txt | grep -o 'https://playit.gg/claim/[^ ]*' || cat playit_raw_log.txt
-            echo "=================================================="
-          fi
+          sleep 5
+          echo "=================================================="
+          echo "🚀 YOUR FIXED TAILSCALE FUNNEL ENDPOINT 🚀"
+          sudo tailscale status --json | grep -o '"DNSName": "[^"]*' || echo "Check your Tailscale Admin Console for the Funnel URL!"
+          echo "=================================================="
 
           node api_server.mjs
