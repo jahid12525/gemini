@@ -1,4 +1,4 @@
-name: 🚀 Gemini Persistent Profile API Gateway (Telegram Turbo Verified)
+name: 🚀 Gemini Persistent Profile API Gateway (Telegram Context Aware)
 
 on:
   workflow_dispatch:
@@ -85,7 +85,7 @@ jobs:
               await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 40000 });
               
               console.log("✅ Gemini Browser Ready via Profile! Listening to Telegram Bot...");
-              await sendTelegramMessage("🟢 Gemini Cloud Runner is Active & Ready!");
+              await sendTelegramMessage("🟢 Gemini Cloud Runner is Active & Ready with Context Memory!");
             } catch (err) { console.error("❌ Init failed:", err.message); process.exit(1); }
           }
 
@@ -99,13 +99,10 @@ jobs:
 
           async function processGeminiTask(promptText, localImagePath) {
             try {
-              console.log('🌐 Opening fresh Gemini chat session...');
-              await page.goto('https://gemini.google.com/app/new', { waitUntil: 'domcontentloaded', timeout: 30000 });
-              await sleep(3000);
+              // চ্যাটবক্স অলরেডি ওপেন আছে কিনা এবং কোনো নোটিফিকেশন ওভারলে থাকলে তা ক্লিয়ার করা
+              try { await page.keyboard.press('Escape'); await sleep(200); } catch (_) {}
 
-              try { await page.keyboard.press('Escape'); await sleep(300); } catch (_) {}
-
-              // ─── আপনার অরিজিনাল ইমেজ আপলোড মেথড ─────────────────────────────
+              // ─── ইমেজ আপলোড মেথড (setInputFiles) ─────────────────────────────
               if (localImagePath && fs.existsSync(localImagePath)) {
                 console.log(`📎 Uploading image: ${path.basename(localImagePath)}`);
                 const uploadBtnSelectors = [
@@ -133,16 +130,18 @@ jobs:
                 }
               }
 
-              // ─── আপনার অরিজিনাল টেক্সট ইনপুট মেথড ──────────────────────────────
-              console.log(`🌐 Sending prompt...`);
+              // ─── টেক্সট ইনপুট ও সাবমিট মেথড (একই সেশনে টাইপিং) ───────────────────
+              console.log(`🌐 Injecting prompt into current session...`);
               const inputSel = 'div.ql-editor[contenteditable="true"]';
               await page.waitForSelector(inputSel, { timeout: 15000 });
               await page.click(inputSel, { force: true });
+              
+              // পুরোনো আধখেচড়া টেক্সট থাকলে বক্স পরিষ্কার করে নেওয়া
               await page.keyboard.press('Control+a');
               await page.keyboard.press('Delete');
               await sleep(200);
 
-              // আপনার অরিজিনাল রেসপন্স কাউন্টার ট্র্যাকিং মেথড
+              // আপনার অরিজিনাল ডম অবজেক্ট কাউন্টার (রানিং সেশনের জন্য মডিফাইড)
               const getResponseCount = () => page.evaluate(() => {
                 const selectors = [
                   'div[id^="model-response-message-content"]',
@@ -163,29 +162,31 @@ jobs:
               await page.keyboard.insertText(promptText);
               await sleep(500);
               await page.keyboard.press('Enter');
-              console.log(`    ⌨️ Submitted via Enter key. Waiting for text stream...`);
+              console.log(`    ⌨️ Submitted. Waiting for context response...`);
 
-              // টেলিগ্রামে ইনিশিয়াল টাইপিং মেসেজ পুশ
+              // টেলিগ্রামে টাইপিং স্টেট পাঠানো
               const initialMsgRes = await fetch(`${TG_API}/sendMessage`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chat_id: CHAT_ID, text: "✍️ Gemini is typing..." })
+                body: JSON.stringify({ chat_id: CHAT_ID, text: "✍️ Gemini is thinking..." })
               });
               const msgData = await initialMsgRes.json();
               const msgId = msgData.result.message_id;
 
-              // ─── আপনার অরিজিনাল রেসপন্স স্ক্র্যাপ লুপ + টেলিগ্রাম লাইভ সিঙ্ক ───
+              // ─── আপনার মেথডের ওল্ড ডম এক্সট্র্যাক্টর লুপ (একই সেশন ট্র্যাকিং ফিক্স) ───
               const deadline = Date.now() + 90000;
               let lastSentText = '';
               let stableCount = 0;
               let tgUpdateCounter = 0;
 
               while (Date.now() < deadline) {
-                await sleep(1000); // ১ সেকেন্ড পর পর চেক করবে
+                await sleep(1000);
                 const currentCount = await getResponseCount();
+                
+                // যদি ডমে কোনো নতুন রেসপন্স নোড এখনও তৈরি না হয়, তবে অপেক্ষা করবে
                 if (currentCount <= initialCount) continue;
 
-                // আপনার মেথডের অফিশিয়াল ডম এক্সট্র্যাক্টর
+                // ডমের একদম শেষের (Latest) প্যারাগ্রাফ অবজেক্ট স্ক্র্যাপ করবে
                 const latestText = await page.evaluate(() => {
                   const selectors = [
                     'div[id^="model-response-message-content"]',
@@ -199,6 +200,8 @@ jobs:
                     document.querySelectorAll(sel).forEach(el => allMatching.push(el));
                   }
                   if (allMatching.length === 0) return '';
+                  
+                  // ডম অর্ডার অনুযায়ী সর্ট করে একদম শেষের এলিমেন্ট নেওয়া (যাতে ওল্ড মেসেজ সিঙ্ক না হয়)
                   allMatching.sort((a, b) => (a.compareDocumentPosition(b) & 4) ? -1 : 1);
                   const lastEl = allMatching[allMatching.length - 1];
                   return lastEl ? (lastEl.innerText || lastEl.textContent || '').trim() : '';
@@ -206,7 +209,6 @@ jobs:
 
                 if (!latestText) continue;
 
-                // রিয়েল-টাইমে টেলিগ্রামে এডিট মেসেজ পাঠানো
                 if (latestText.length > lastSentText.length) {
                   tgUpdateCounter++;
                   if (tgUpdateCounter % 2 === 0 || latestText.length - lastSentText.length > 40) {
@@ -220,23 +222,26 @@ jobs:
                   stableCount = 0;
                 } else if (latestText.length > 0 && latestText.length === lastSentText.length) {
                   stableCount++;
-                  // জেমিনির লোডিং এনিমেশন চলে গেছে কিনা ভেরিফাই করা
+                  
                   const isFinished = await page.evaluate(() => {
-                    const el = document.querySelector('message-content, div[id^="model-response-message-content"]');
-                    return el ? (!el.innerHTML.includes('loading') && !el.innerHTML.includes('...')) : true;
+                    const nodes = document.querySelectorAll('message-content, div[id^="model-response-message-content"]');
+                    if (nodes.length === 0) return true;
+                    // শুধুমাত্র লাস্ট নোডের লোডিং এনিমেশন চেক করা হচ্ছে
+                    const lastNode = nodes[nodes.length - 1];
+                    return lastNode ? (!lastNode.innerHTML.includes('loading') && !lastNode.innerHTML.includes('...')) : true;
                   }).catch(() => true);
                   
                   if (stableCount >= 2 && isFinished) { lastSentText = latestText; break; }
                 }
               }
 
-              // ফাইনাল ওয়ান-টাইম মেসেজ আপডেট নিশ্চিত করা
+              // ফাইনাল সিঙ্ক পুশ
               await fetch(`${TG_API}/editMessageText`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ chat_id: CHAT_ID, message_id: msgId, text: lastSentText })
               }).catch(() => {});
-              console.log("✅ Stream response sent back to Telegram perfectly!");
+              console.log("✅ Live context message update complete!");
 
             } catch (err) {
               await sendTelegramMessage(`❌ Task Error: ${err.message}`);
@@ -262,9 +267,18 @@ jobs:
                     if (message && String(message.chat.id) === String(CHAT_ID)) {
                       let promptText = message.text || message.caption || "";
                       let localImagePath = null;
+                      let fileId = null;
 
                       if (message.photo) {
-                        const fileId = message.photo[message.photo.length - 1].file_id;
+                        fileId = message.photo[message.photo.length - 1].file_id;
+                      } else if (message.document) {
+                        const mime = message.document.mime_type || "";
+                        if (mime.startsWith("image/")) {
+                          fileId = message.document.file_id;
+                        }
+                      }
+
+                      if (fileId) {
                         const fileRes = await fetch(`${TG_API}/getFile?file_id=${fileId}`);
                         const fileData = await fileRes.json();
                         const filePath = fileData.result.file_path;
@@ -275,6 +289,7 @@ jobs:
                         
                         localImagePath = path.join(os.tmpdir(), `tg_upload_${Date.now()}.jpg`);
                         fs.writeFileSync(localImagePath, buffer);
+                        console.log(`📥 Image successfully grabbed and stored on runner.`);
                       }
 
                       if (promptText && !promptText.startsWith('/start')) {
