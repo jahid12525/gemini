@@ -1,11 +1,11 @@
-name: 🚀 Gemini API Gateway via Tailscale Funnel (IP Binding Fixed)
+name: 🚀 Gemini API Gateway via ngrok (No More 502)
 
 on:
   workflow_dispatch:
 
 jobs:
   run-api-gateway:
-    name: 🌐 Launch Persistent Playwright API Server + Tailscale Bridge
+    name: 🌐 Launch Persistent Playwright API Server + ngrok Tunnel
     runs-on: ubuntu-latest
 
     steps:
@@ -15,7 +15,7 @@ jobs:
       - name: 📦 Setup Node.js Environment
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: 📥 Install Node Dependencies
         run: |
@@ -46,9 +46,9 @@ jobs:
           rm -f gemini_profile.zip
           echo "✅ Google Profile Loaded Successfully!"
 
-      - name: 🛠️ Launch Gemini API Engine & Start Tailscale Funnel
+      - name: 🛠️ Launch Gemini API Engine & Start ngrok Tunnel
         env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
         run: |
           cat > api_server.mjs << 'SERVER_EOF'
           import express from 'express';
@@ -183,29 +183,29 @@ jobs:
             }
           });
 
-          // ফিক্স ১: এক্সপ্রেসকে স্পষ্টভাবে ১২৭.০.০.১ আইপিতে বাইন্ড করা হলো
+          // এক্সপ্রেস সার্ভার এখন লোকালহোস্ট পোর্টে লিসেন করবে
           app.listen(PORT, '127.0.0.1', async () => {
             await initGemini();
-            console.log(`🤖 Local API Server running on http://127.0.0.1:${PORT}`);
+            print(`🤖 Local API Server running on http://127.0.0.1:${PORT}`);
           });
           SERVER_EOF
 
-          echo "📥 Installing Tailscale Daemon..."
-          curl -fsSL https://tailscale.com/install.sh | sh
+          echo "📥 Installing ngrok..."
+          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.md5/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com noble main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt-get update && sudo apt-get install ngrok -y
 
-          echo "⚡ Connecting to Tailscale Network..."
-          sudo tailscale up --authkey="$TAILSCALE_AUTH_KEY" --hostname="gemini-runner-2" --accept-dns=false
+          echo "⚡ Configuring ngrok Token..."
+          ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
 
-          echo "🔀 Configuring Tailscale Serve Backend to explicit Localhost IP..."
-          # ফিক্স ২: টেলস্কেলকে ডিরেক্ট স্কিমসহ লোকাল আইপি চিনিয়ে দেওয়া হলো
-          sudo tailscale serve --bg http://127.0.0.1:3000
-
-          echo "🌐 Activating Global Funnel In Background..."
-          sudo tailscale funnel --bg 443
-
+          echo "🌐 Starting ngrok Tunnel on Port 3000..."
+          # ব্যাকগ্রাউন্ডে টানেল অন করে পাবলিক URL বের করার জন্য
+          ngrok http 127.0.0.1:3000 --log=stdout > ngrok.log &
+          
           sleep 5
-          echo "=================================================="
-          echo "🚀 TAILSCALE ENDPOINT ACTIVE 🚀"
-          echo "=================================================="
+          echo "========================================= ===="
+          echo "🔗 YOUR NGROK PUBLIC TUNNEL URL: 🔗"
+          curl -s http://127.0.0.1:4040/api/tunnels | json_pp | grep public_url
+          echo "=============================================="
 
           node api_server.mjs
