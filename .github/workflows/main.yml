@@ -1,11 +1,11 @@
-name: 🚀 Gemini Persistent Profile API Gateway
+name: 🚀 Gemini Persistent Profile API Gateway (Serveo Ultimate)
 
 on:
   workflow_dispatch:
 
 jobs:
   run-api-gateway:
-    name: 🌐 Launch Persistent API + LocalTunnel
+    name: 🌐 Launch Persistent API + Serveo Fixed Tunnel
     runs-on: ubuntu-latest
 
     steps:
@@ -20,7 +20,7 @@ jobs:
       - name: 📥 Install System & Node Dependencies
         run: |
           npm init -y
-          npm install express playwright playwright-extra puppeteer-extra-plugin-stealth localtunnel multer
+          npm install express playwright playwright-extra puppeteer-extra-plugin-stealth multer
           npx playwright install chrome --with-deps
 
       - name: 🖥️ Start Virtual Display (Xvfb)
@@ -38,23 +38,14 @@ jobs:
             echo "❌ Error: PROFILE_DOWNLOAD_URL secret is missing!"
             exit 1
           fi
-          
-          echo "📥 Downloading profile from secure cloud link..."
           wget -q -O gemini_profile.zip "$DOWNLOAD_URL"
-          
-          if [ -s "gemini_profile.zip" ]; then
-            unzip -q gemini_profile.zip -d ./
-            echo "🧹 Cleaning Windows specific lock files from profile..."
-            rm -f ./gemini_profile/SingletonLock
-            rm -f ./gemini_profile/Lock
-            rm -f ./gemini_profile/Google\ Profile\ Lock
-            rm -rf ./gemini_profile/Default/Cache/*
-            rm -f gemini_profile.zip
-            echo "✅ Secure Profile directory is ready!"
-          else
-            echo "❌ Error: Failed to download gemini_profile.zip!"
-            exit 1
-          fi
+          unzip -q gemini_profile.zip -d ./
+          rm -f ./gemini_profile/SingletonLock
+          rm -f ./gemini_profile/Lock
+          rm -f ./gemini_profile/Google\ Profile\ Lock
+          rm -rf ./gemini_profile/Default/Cache/*
+          rm -f gemini_profile.zip
+          echo "✅ Google Profile Ready!"
 
       - name: 🛠️ Create & Start API Gateway Server
         run: |
@@ -62,7 +53,6 @@ jobs:
 
           cat > server.mjs << 'SERVER_EOF'
           import express from 'express';
-          import multer from 'multer';
           import { chromium } from 'playwright-extra';
           import StealthPlugin from 'puppeteer-extra-plugin-stealth';
           import fs from 'fs';
@@ -71,17 +61,17 @@ jobs:
 
           chromium.use(StealthPlugin());
           const app = express();
-          const upload = multer({ dest: os.tmpdir() });
           
-          app.use(express.json());
-          app.use(express.urlencoded({ extended: true }));
+          // Base64 ইমেজ হ্যান্ডেল করার জন্য মেমোরি লিমিট ৫০ মেগাবাইট করা হলো
+          app.use(express.json({ limit: '50mb' }));
+          app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
           const PORT = 8080;
           let context, page;
 
           async function initGemini() {
             try {
-              console.log("⚡ [CONSOLE UPDATE] Launching Local Google Chrome Instance...");
+              console.log("⚡ Launching Local Google Chrome Instance...");
               context = await chromium.launchPersistentContext('./gemini_profile', {
                 headless: false,
                 channel: 'chrome',
@@ -93,114 +83,82 @@ jobs:
                   '--disable-gpu'
                 ],
                 viewport: { width: 1280, height: 800 },
-                recordVideo: {
-                  dir: '/tmp/gemini-recordings/',
-                  size: { width: 1280, height: 800 }
-                }
+                recordVideo: { dir: '/tmp/gemini-recordings/', size: { width: 1280, height: 800 } }
               });
-
               page = await context.newPage();
               await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded' });
-              console.log("✅ [CONSOLE UPDATE] Gemini Browser Ready!");
+              console.log("✅ Gemini Browser Ready!");
             } catch (err) {
-              console.error("❌ [CRITICAL ERROR] Init failed:", err.message);
+              console.error("❌ Init failed:", err.message);
             }
           }
 
-          app.post('/api/gemini', upload.any(), async (req, res) => {
+          app.post('/api/gemini', async (req, res) => {
             if (!page) return res.status(500).json({ success: false, error: 'Browser stack not ready' });
             
             const promptText = req.body.prompt;
+            const base64Image = req.body.image; 
+            
             if (!promptText) return res.status(400).json({ error: 'Prompt is required' });
 
+            let tempFilePath = null;
+
             try {
-              console.log(`🤖 [API] New Request received. Prompt length: ${promptText.length}`);
+              console.log(`🤖 [API] Request received. Base64 Image Present: ${!!base64Image}`);
               
-              // ─── [FIX 408] ফুল পেজ রিলোড না করে ডিরেক্ট নিউ চ্যাট বাটনে ক্লিক ট্রিক ───
+              // New Chat SPA Button Click (Fix 408)
               const newChatBtnSel = 'a[href="/app/new"], button:has-text("New chat"), [aria-label="New chat"]';
               const newChatBtn = await page.$(newChatBtnSel);
-              
               if (newChatBtn) {
                 await newChatBtn.click();
-                console.log("🔄 [API] Opened fresh chat via internal SPA button click (No Full Reload).");
                 await new Promise(r => setTimeout(r, 1200)); 
               } else {
-                console.log("⚠️ New chat button not found in DOM, forcing light navigation...");
                 await page.goto('https://gemini.google.com/app', { waitUntil: 'commit' }); 
                 await new Promise(r => setTimeout(r, 2000));
               }
-              
               try { await page.keyboard.press('Escape'); } catch(_) {}
 
-              // ─── আপনার প্রোজেক্টের অরিজিনাল ফিক্সড ইমেজ আপলোড লজিক ───
-              if (req.files && req.files.length > 0) {
-                const file = req.files[0];
-                console.log(`📸 [API] Processing image upload: ${file.originalname}`);
+              // Base64 ইমেজ আপলোড লজিক
+              if (base64Image) {
+                tempFilePath = path.join(os.tmpdir(), `upload_${Date.now()}.jpg`);
+                fs.writeFileSync(tempFilePath, Buffer.from(base64Image, 'base64'));
 
                 const uploadBtnSelectors = [
                   'button[aria-label="Open upload file menu"]',
                   'button[aria-label="Upload file"]',
                   'button[aria-label="Add image"]',
                   'button[aria-label="Attach files"]',
-                  '[aria-label="Open upload file menu"]',
-                  '[data-test-id="upload-button"]',
                 ];
 
                 let uploadBtnClicked = false;
                 for (const sel of uploadBtnSelectors) {
                   try {
                     const btn = await page.$(sel);
-                    if (btn) {
-                      await btn.click();
-                      console.log(`   🖱️ Clicked upload button: ${sel}`);
-                      uploadBtnClicked = true;
-                      break;
-                    }
+                    if (btn) { await btn.click(); uploadBtnClicked = true; break; }
                   } catch (_) {}
-                }
-
-                if (!uploadBtnClicked) {
-                  uploadBtnClicked = await page.evaluate(() => {
-                    const btn = [...document.querySelectorAll('button, [role="button"]')].find(el => {
-                      const label = (el.getAttribute('aria-label') || '').toLowerCase();
-                      return label.includes('upload') || label.includes('attach') || label.includes('add image');
-                    });
-                    if (btn) { btn.click(); return true; }
-                    return false;
-                  });
                 }
 
                 if (uploadBtnClicked) {
                   const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
                   if (fileInput) {
-                    await fileInput.setInputFiles(file.path);
-                    console.log('    ✅ Image attached successfully via setInputFiles!');
+                    await fileInput.setInputFiles(tempFilePath);
                     await new Promise(r => setTimeout(r, 1500));
                   }
-                } else {
-                  console.log('⚠️ Upload button couldn\'t be clicked, trying fallback direct attachment...');
-                  const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 3000 });
-                  await fileInput.setInputFiles(file.path);
                 }
-
-                if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
               }
 
-              // ─── প্রম্পট ইনপুট এরিয়া অ্যাক্টিভেশন ও ক্লিয়ারিং ───
+              // প্রম্পট পাঠানো
               const inputSel = 'div.ql-editor[contenteditable="true"], div[role="textbox"], textarea';
               await page.waitForSelector(inputSel, { timeout: 5000 });
               await page.click(inputSel, { force: true });
-              
               await page.keyboard.press('Control+a');
               await page.keyboard.press('Delete');
-              
               await page.keyboard.insertText(promptText);
               await page.keyboard.press('Enter');
 
               const responseSel = 'div[id^="model-response-message-content"], message-content, .message-content-inner';
               await page.waitForSelector(responseSel, { timeout: 15000 });
 
-              // HTTP স্ট্রিমিং রেসপন্স হেডার সেটআপ
               res.setHeader('Content-Type', 'text/event-stream');
               res.setHeader('Cache-Control', 'no-cache');
               res.setHeader('Connection', 'keep-alive');
@@ -210,7 +168,6 @@ jobs:
 
               while (true) {
                 await new Promise(r => setTimeout(r, 200));
-                
                 const currentFullText = await page.evaluate((selector) => {
                   const el = document.querySelector(selector);
                   return el ? el.innerText.trim() : '';
@@ -223,33 +180,25 @@ jobs:
                   noChangeCounter = 0;
                 } else if (currentFullText.length > 0 && currentFullText.length === lastSentText.length) {
                   noChangeCounter++;
-                  
                   const isFinished = await page.evaluate((selector) => {
                     const el = document.querySelector(selector);
-                    if (!el) return true;
-                    return !el.innerHTML.includes('loading') && !el.innerHTML.includes('...');
+                    return el ? (!el.innerHTML.includes('loading') && !el.innerHTML.includes('...')) : true;
                   }, responseSel);
-
-                  if (noChangeCounter > 5 && isFinished) {
-                    break;
-                  }
+                  if (noChangeCounter > 5 && isFinished) break;
                 }
               }
-
               res.end();
-              console.log(`✅ [API] Realtime Stream Complete!`);
             } catch (err) {
               console.error(`❌ [API ERROR]`, err.message);
-              if (!res.headersSent) {
-                res.status(500).json({ success: false, error: err.message });
-              } else {
-                res.end();
-              }
+              if (!res.headersSent) res.status(500).json({ success: false, error: err.message });
+              else res.end();
+            } finally {
+              if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
             }
           });
 
           app.listen(PORT, '0.0.0.0', async () => {
-            console.log(`🚀 API Internal Server running on port ${PORT}`);
+            console.log(`🚀 API Server active on port ${PORT}`);
             await initGemini();
           });
           SERVER_EOF
@@ -257,16 +206,18 @@ jobs:
           node server.mjs &
           sleep 5
 
-      - name: 🔗 Bind & Expose via LocalTunnel Gateway
+      - name: 🔗 Bind & Expose via Serveo (No Timeout & Fixed Subdomain)
         run: |
-          echo "🔗 Connecting LocalTunnel Gateway..."
-          sudo npm install -g localtunnel
+          echo "🚀 Starting Permanent Fixed Serveo SSH Tunnel..."
+          # 'ruslan-gemini' সাবডোমেনটি আপনার জন্য আজীবনের জন্য লক হয়ে থাকবে
+          ssh -R ruslan-gemini:80:localhost:8080 serveo.net -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=5 > /tmp/serveo.log 2>&1 &
           
-          # সাবডোমেন বিজি থাকলে বা ক্র্যাশ করলে অটো-রিস্টার্ট মেকানিজম লুপ
-          until lt --port 8080 --subdomain ruslan-gemini-api; do
-            echo "🔄 LocalTunnel slot busy or disconnected! Reconnecting in 3 seconds..."
-            sleep 3
-          done &
+          sleep 8
+          echo "--------------------------------------------------------"
+          echo "🔗 YOUR PERMANENT FIXED API GATEWAY ENDPOINT:"
+          echo "https://ruslan-gemini.serveo.net/api/gemini"
+          echo "--------------------------------------------------------"
+          cat /tmp/serveo.log
           
           sleep 18000
 
