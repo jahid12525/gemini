@@ -81,7 +81,7 @@ jobs:
 
           function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-          async function getLatestResponse() {
+          async function getResponseCount() {
             return page.evaluate(() => {
               const selectors = [
                 'div[id^="model-response-message-content"]',
@@ -89,11 +89,29 @@ jobs:
                 'div.message-content',
                 'model-response'
               ];
-              let lastEl = null;
+              let max = 0;
               for (const sel of selectors) {
-                const els = document.querySelectorAll(sel);
-                if (els.length > 0) lastEl = els[els.length - 1];
+                const count = document.querySelectorAll(sel).length;
+                if (count > max) max = count;
               }
+              return max;
+            }).catch(() => 0);
+          }
+
+          async function getLastResponseText() {
+            return page.evaluate(() => {
+              const selectors = [
+                'div[id^="model-response-message-content"]',
+                'message-content',
+                'div.message-content',
+                'model-response'
+              ];
+              let allEls = [];
+              for (const sel of selectors) {
+                document.querySelectorAll(sel).forEach(el => allEls.push(el));
+              }
+              if (allEls.length === 0) return '';
+              const lastEl = allEls[allEls.length - 1];
               return lastEl ? (lastEl.innerText || lastEl.textContent || '').trim() : '';
             }).catch(() => '');
           }
@@ -179,6 +197,10 @@ jobs:
                 await uploadImage(localImagePath);
               }
 
+              // Count responses BEFORE submitting
+              const prevCount = await getResponseCount();
+              console.log(`📊 Previous response count: ${prevCount}`);
+
               const inputSel = 'div.ql-editor[contenteditable="true"]';
               await page.waitForSelector(inputSel, { timeout: 20000 });
               await page.click(inputSel);
@@ -193,14 +215,34 @@ jobs:
               send({ type: 'start' });
               console.log(`📤 Prompt: ${prompt.substring(0, 50)}...`);
 
+              // Wait for NEW response to appear
               const deadline = Date.now() + 120000;
+              let newResponseAppeared = false;
+
+              while (Date.now() < deadline) {
+                await sleep(300);
+                const currentCount = await getResponseCount();
+                if (currentCount > prevCount) {
+                  newResponseAppeared = true;
+                  console.log(`✅ New response detected! Count: ${currentCount}`);
+                  break;
+                }
+              }
+
+              if (!newResponseAppeared) {
+                send({ type: 'error', error: 'New response did not appear in time' });
+                res.end();
+                return;
+              }
+
+              // Stream the NEW response only
               let lastSentText = '';
               let lastSeenText = '';
               let stableCount = 0;
 
               while (Date.now() < deadline) {
                 await sleep(300);
-                const latestText = await getLatestResponse();
+                const latestText = await getLastResponseText();
                 if (!latestText) continue;
 
                 if (latestText.length > lastSentText.length) {
