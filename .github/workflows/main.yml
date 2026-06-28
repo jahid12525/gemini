@@ -10,7 +10,7 @@ jobs:
   run-api-gateway:
     name: 🌐 Launch Persistent Playwright API Server + Cloudflare Tunnel
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 330
 
     steps:
       - name: 📦 Checkout Repository Code
@@ -213,11 +213,10 @@ jobs:
           SERVER_EOF
           echo "✅ API Server script created!"
 
-      - name: 🌐 Start Tunnel & Publish URL to Repo
+      - name: 🌐 Start Tunnel & Publish URL to Central Repo
         env:
           DISPLAY: :99
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
+          CENTRAL_REPO_TOKEN: ${{ secrets.CENTRAL_REPO_TOKEN }}
         run: |
           echo "🌐 Starting Cloudflare Quick Tunnel..."
           cloudflared tunnel --url http://127.0.0.1:3000 \
@@ -244,17 +243,37 @@ jobs:
 
           echo "✅ Tunnel URL: $TUNNEL_URL"
 
-          # ── Push URL to repo using token in remote URL (fixes 403) ──
-          git config user.email "actions@github.com"
-          git config user.name "GitHub Actions Bot"
+          # ── Push URL to central repo via GitHub API ──
+          CENTRAL_REPO="jahid12525/gemini-url"
+          FILE_PATH="tunnel_url.txt"
+          API_URL="https://api.github.com/repos/$CENTRAL_REPO/contents/$FILE_PATH"
 
-          # Set remote URL with token embedded
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+          SHA=$(curl -s \
+            -H "Authorization: token $CENTRAL_REPO_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "$API_URL" | grep -o '"sha":"[^"]*"' | head -1 | cut -d'"' -f4)
 
-          echo "$TUNNEL_URL" > tunnel_url.txt
-          git add tunnel_url.txt
-          git commit -m "🔗 Update tunnel URL [skip ci]"
-          git push origin HEAD:main
+          CONTENT=$(echo -n "$TUNNEL_URL" | base64 -w 0)
+
+          if [ -n "$SHA" ]; then
+            PAYLOAD="{\"message\":\"🔗 Update tunnel URL [skip ci]\",\"content\":\"$CONTENT\",\"sha\":\"$SHA\"}"
+          else
+            PAYLOAD="{\"message\":\"🔗 Create tunnel URL [skip ci]\",\"content\":\"$CONTENT\"}"
+          fi
+
+          HTTP_STATUS=$(curl -s -o push_result.json -w "%{http_code}" -X PUT \
+            -H "Authorization: token $CENTRAL_REPO_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$API_URL")
+
+          if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]; then
+            echo "✅ tunnel_url.txt updated in central repo!"
+          else
+            echo "❌ Failed to update central repo (HTTP $HTTP_STATUS)"
+            cat push_result.json
+          fi
 
           echo "=============================================="
           echo "✅ CLOUDFLARE TUNNEL IS LIVE!"
@@ -263,8 +282,8 @@ jobs:
           echo "📡 API Endpoint: $TUNNEL_URL/api/gemini"
           echo "❤️  Health Check: $TUNNEL_URL/health"
           echo ""
-          echo "📌 FIXED URL to get current tunnel:"
-          echo "   https://raw.githubusercontent.com/$REPO/main/tunnel_url.txt"
+          echo "📌 FIXED URL (never changes):"
+          echo "   https://raw.githubusercontent.com/$CENTRAL_REPO/main/$FILE_PATH"
           echo "=============================================="
 
           node api_server.mjs
