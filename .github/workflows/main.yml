@@ -39,23 +39,6 @@ jobs:
           echo "DISPLAY=:99" >> $GITHUB_ENV
           echo "✅ Xvfb started"
 
-      - name: 📂 Download & Extract Google Profile
-        env:
-          DOWNLOAD_URL: ${{ secrets.PROFILE_DOWNLOAD_URL }}
-        run: |
-          if [ -z "$DOWNLOAD_URL" ]; then
-            echo "❌ PROFILE_DOWNLOAD_URL secret is missing!"
-            exit 1
-          fi
-          wget -q -O gemini_profile.zip "$DOWNLOAD_URL" || { echo "❌ Failed to download profile"; exit 1; }
-          unzip -q gemini_profile.zip -d ./
-          rm -f ./gemini_profile/SingletonLock
-          rm -f ./gemini_profile/Lock
-          rm -f "./gemini_profile/Google Profile Lock"
-          rm -rf ./gemini_profile/Default/Cache/*
-          rm -f gemini_profile.zip
-          echo "✅ Google Profile Loaded!"
-
       - name: 📥 Install Cloudflare Tunnel
         run: |
           curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o cloudflared.deb
@@ -71,7 +54,7 @@ jobs:
             -vcodec libx264 -preset ultrafast -crf 30 \
             /tmp/recordings/session.mp4 > /tmp/ffmpeg.log 2>&1 &
           echo $! > /tmp/ffmpeg.pid
-          echo "✅ Screen recording started (PID: $(cat /tmp/ffmpeg.pid))"
+          echo "✅ Screen recording started"
 
       - name: 🛠️ Create Gemini API Server
         run: |
@@ -88,6 +71,9 @@ jobs:
           let context, page;
           const PORT = 3000;
           let screenshotCount = 0;
+
+          const GMAIL_EMAIL = process.env.GMAIL_EMAIL || '';
+          const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || '';
 
           function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -134,27 +120,101 @@ jobs:
             }).catch(() => '');
           }
 
-          async function isGeminiLoading() {
-            return page.evaluate(() => {
-              const loadingSelectors = [
-                '.loading-indicator',
-                '[data-is-loading="true"]',
-                'div[aria-label="Loading"]',
-                '.progress-container',
-                'div.thinking',
-                'model-response.loading',
-              ];
-              for (const sel of loadingSelectors) {
-                if (document.querySelector(sel)) return true;
-              }
-              const html = document.body.innerHTML;
-              return html.includes('loading') || html.includes('Thinking') || html.includes('...');
-            }).catch(() => false);
+          async function dismissOverlays() {
+            try { await page.keyboard.press('Escape'); await sleep(300); } catch (_) {}
+            try { await page.keyboard.press('Escape'); await sleep(300); } catch (_) {}
+            const dismissSels = [
+              'button:has-text("Got it")',
+              'button:has-text("Dismiss")',
+              'button:has-text("Close")',
+              'button:has-text("OK")',
+              'button:has-text("I agree")',
+              'button:has-text("Continue")',
+              'button:has-text("Skip")',
+              'button:has-text("Done")',
+              'button:has-text("Not now")',
+              '[aria-label="Close"]',
+              '[aria-label="Dismiss"]',
+              'mat-dialog-container button',
+            ];
+            for (const sel of dismissSels) {
+              try {
+                const btn = await page.$(sel);
+                if (btn) {
+                  await btn.click();
+                  await sleep(400);
+                  console.log(`    🚫 Dismissed: ${sel}`);
+                }
+              } catch (_) {}
+            }
+            try {
+              const overlay = await page.$('.cdk-overlay-backdrop');
+              if (overlay) { await overlay.click(); await sleep(400); }
+            } catch (_) {}
+          }
+
+          async function googleLogin() {
+            console.log('🔐 Starting Google auto-login...');
+
+            await page.goto('https://accounts.google.com/signin', {
+              waitUntil: 'domcontentloaded',
+              timeout: 30000
+            });
+            await sleep(2000);
+            await takeScreenshot('login_01_start');
+
+            // Enter email
+            try {
+              await page.waitForSelector('input[type="email"]', { timeout: 10000 });
+              await page.fill('input[type="email"]', GMAIL_EMAIL);
+              await sleep(500);
+              await takeScreenshot('login_02_email_filled');
+              await page.keyboard.press('Enter');
+              await sleep(2000);
+              await takeScreenshot('login_03_after_email');
+            } catch (e) {
+              console.error('❌ Email field not found:', e.message);
+              throw e;
+            }
+
+            // Enter password (app password - bypasses 2FA)
+            try {
+              await page.waitForSelector('input[type="password"]', { timeout: 10000 });
+              await page.fill('input[type="password"]', GMAIL_APP_PASSWORD);
+              await sleep(500);
+              await takeScreenshot('login_04_password_filled');
+              await page.keyboard.press('Enter');
+              await sleep(3000);
+              await takeScreenshot('login_05_after_password');
+            } catch (e) {
+              console.error('❌ Password field not found:', e.message);
+              throw e;
+            }
+
+            // Handle any post-login prompts
+            await dismissOverlays();
+            await sleep(2000);
+            await takeScreenshot('login_06_post_login');
+
+            // Verify login success
+            const currentUrl = page.url();
+            console.log(`    🔍 Post-login URL: ${currentUrl}`);
+
+            if (currentUrl.includes('accounts.google.com') &&
+                currentUrl.includes('signin')) {
+              await takeScreenshot('login_failed');
+              throw new Error('Login failed - still on login page');
+            }
+
+            console.log('✅ Google login successful!');
           }
 
           async function saveImage(image_base64) {
             const buffer = Buffer.from(image_base64.replace(/^data:image\/\w+;base64,/, ""), 'base64');
-            const localImagePath = path.join(os.tmpdir(), `upload_${Date.now()}.jpg`);
+            const mimeMatch = image_base64.match(/^data:([^;]+);base64,/);
+            const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+            const ext = mime.split('/')[1]?.replace('jpeg', 'jpg') || 'jpg';
+            const localImagePath = path.join(os.tmpdir(), `upload_${Date.now()}.${ext}`);
             fs.writeFileSync(localImagePath, buffer);
             return localImagePath;
           }
@@ -162,7 +222,6 @@ jobs:
           async function uploadImage(localImagePath) {
             console.log(`    📎 Uploading: ${path.basename(localImagePath)}`);
 
-            // Log all buttons for debugging
             const btns = await page.evaluate(() =>
               [...document.querySelectorAll('button[aria-label]')]
                 .map(b => b.getAttribute('aria-label'))
@@ -194,7 +253,6 @@ jobs:
               } catch (_) {}
             }
 
-            // Fallback: partial label match
             if (!uploadClicked) {
               uploadClicked = await page.evaluate(() => {
                 const btn = [...document.querySelectorAll('button[aria-label]')].find(el => {
@@ -209,27 +267,12 @@ jobs:
               if (uploadClicked) {
                 console.log('    🖱️ Clicked via partial match');
                 await sleep(1500);
-                await takeScreenshot('upload_02_partial_match');
+                await takeScreenshot('upload_02_partial');
               }
             }
 
-            if (!uploadClicked) {
-              console.log('    ⚠️ No upload button found');
-              await takeScreenshot('upload_02_no_btn');
-            }
-
-            // Click submenu if appeared
+            // Click submenu
             if (uploadClicked) {
-              const submenuItems = await page.evaluate(() =>
-                [...document.querySelectorAll('button, li, [role="menuitem"]')]
-                  .filter(el => {
-                    const t = (el.innerText || el.textContent || '').toLowerCase().trim();
-                    return t.includes('upload') || t.includes('computer') || t.includes('device');
-                  })
-                  .map(el => (el.innerText || el.textContent || '').trim())
-              ).catch(() => []);
-              console.log(`    🔍 Submenu items: ${JSON.stringify(submenuItems)}`);
-
               const submenuSelectors = [
                 'button:has-text("Upload from computer")',
                 'button:has-text("Upload from device")',
@@ -260,7 +303,7 @@ jobs:
               if (fileInput) {
                 await fileInput.setInputFiles(localImagePath);
                 await sleep(3000);
-                await takeScreenshot('upload_04_strategy_a');
+                await takeScreenshot('upload_04_strategy_a_done');
                 console.log('    ✅ Strategy A worked');
                 return { success: true, strategy: 'Strategy A (setInputFiles)' };
               }
@@ -269,7 +312,7 @@ jobs:
               await takeScreenshot('upload_04_strategy_a_fail');
             }
 
-            // Strategy B: filechooser intercept
+            // Strategy B: filechooser
             try {
               console.log('    🔄 Strategy B: filechooser...');
               const [fileChooser] = await Promise.all([
@@ -297,7 +340,7 @@ jobs:
               ]);
               await fileChooser.setFiles(localImagePath);
               await sleep(3000);
-              await takeScreenshot('upload_04_strategy_b');
+              await takeScreenshot('upload_04_strategy_b_done');
               console.log('    ✅ Strategy B worked');
               return { success: true, strategy: 'Strategy B (filechooser)' };
             } catch (e) {
@@ -306,14 +349,13 @@ jobs:
             }
 
             await takeScreenshot('upload_05_all_failed');
-            console.warn('    ❌ All strategies failed');
             return { success: false, strategy: 'none' };
           }
 
           async function initGemini() {
             console.log("⚡ Launching Chrome...");
             try {
-              context = await chromium.launchPersistentContext('./gemini_profile', {
+              context = await chromium.launch({
                 headless: false,
                 channel: 'chrome',
                 args: [
@@ -323,20 +365,36 @@ jobs:
                   '--disable-blink-features=AutomationControlled',
                   '--disable-web-security',
                   '--window-size=1920,1080'
-                ],
-                viewport: { width: 1920, height: 1080 }
+                ]
               });
+
               page = await context.newPage();
+              await page.setViewportSize({ width: 1920, height: 1080 });
               await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+
+              // Auto login with app password
+              await googleLogin();
+
+              // Navigate to Gemini
+              console.log('🌐 Navigating to Gemini...');
               await page.goto('https://gemini.google.com/app', {
                 waitUntil: 'domcontentloaded',
                 timeout: 60000
               });
               await sleep(3000);
+              await dismissOverlays();
               await takeScreenshot('00_gemini_ready');
+
+              // Verify logged in
+              const url = page.url();
+              console.log(`    🔍 URL: ${url}`);
+              if (url.includes('accounts.google.com')) {
+                throw new Error('Not logged in after login attempt');
+              }
+
               console.log("✅ Gemini Ready!");
             } catch (err) {
-              console.error("❌ Failed to initialize Gemini:", err.message);
+              console.error("❌ Failed to initialize:", err.message);
               process.exit(1);
             }
           }
@@ -370,13 +428,15 @@ jobs:
                 send({ type: 'info', text: '📎 Uploading image to Gemini...' });
                 const uploadResult = await uploadImage(localImagePath);
                 if (!uploadResult.success) {
-                  send({ type: 'error', error: '❌ Failed to upload image - all strategies failed' });
+                  send({ type: 'error', error: '❌ Failed to upload image' });
                   clearInterval(keepalive);
                   res.end();
                   return;
                 }
                 send({ type: 'info', text: `✅ Image uploaded via: ${uploadResult.strategy}` });
               }
+
+              await dismissOverlays();
 
               const prevCount = await getResponseCount();
               console.log(`📊 Previous response count: ${prevCount}`);
@@ -407,13 +467,11 @@ jobs:
                   console.log(`✅ New response detected! Count: ${currentCount}`);
                   break;
                 }
-                const loading = await isGeminiLoading();
-                if (loading) console.log("⏳ Gemini is thinking...");
               }
 
               if (!newResponseAppeared) {
                 await takeScreenshot('no_response');
-                send({ type: 'error', error: 'New response did not appear in time' });
+                send({ type: 'error', error: 'No response from Gemini' });
                 clearInterval(keepalive);
                 res.end();
                 return;
@@ -477,6 +535,8 @@ jobs:
         env:
           DISPLAY: :99
           CENTRAL_REPO_TOKEN: ${{ secrets.CENTRAL_REPO_TOKEN }}
+          GMAIL_EMAIL: ${{ secrets.GMAIL_EMAIL }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
           echo "🌐 Starting Cloudflare Quick Tunnel..."
           cloudflared tunnel --url http://127.0.0.1:3000 \
