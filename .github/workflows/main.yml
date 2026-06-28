@@ -116,6 +116,42 @@ jobs:
             }).catch(() => '');
           }
 
+          async function dismissOverlays() {
+            try { await page.keyboard.press('Escape'); await sleep(300); } catch (_) {}
+            try { await page.keyboard.press('Escape'); await sleep(300); } catch (_) {}
+            const dismissSels = [
+              'button:has-text("Got it")',
+              'button:has-text("Dismiss")',
+              'button:has-text("Close")',
+              'button:has-text("OK")',
+              'button:has-text("I agree")',
+              'button:has-text("Continue")',
+              'button:has-text("Skip")',
+              'button:has-text("Done")',
+              '[aria-label="Close"]',
+              '[aria-label="Dismiss"]',
+              'mat-dialog-container button',
+            ];
+            for (const sel of dismissSels) {
+              try {
+                const btn = await page.$(sel);
+                if (btn) {
+                  await btn.click();
+                  await sleep(400);
+                  console.log(`    🚫 Dismissed: ${sel}`);
+                }
+              } catch (_) {}
+            }
+            try {
+              const overlay = await page.$('.cdk-overlay-backdrop');
+              if (overlay) {
+                await overlay.click();
+                await sleep(400);
+                console.log('    🚫 Clicked overlay backdrop');
+              }
+            } catch (_) {}
+          }
+
           async function saveImage(image_base64) {
             const buffer = Buffer.from(image_base64.replace(/^data:image\/\w+;base64,/, ""), 'base64');
             const mimeMatch = image_base64.match(/^data:([^;]+);base64,/);
@@ -128,6 +164,13 @@ jobs:
 
           async function uploadImage(localImagePath) {
             console.log(`    📎 Uploading: ${path.basename(localImagePath)}`);
+
+            await page.goto('https://gemini.google.com/app', {
+              waitUntil: 'domcontentloaded',
+              timeout: 30000
+            });
+            await sleep(2000);
+            await dismissOverlays();
 
             const uploadBtnSelectors = [
               'button[aria-label="Open upload file menu"]',
@@ -153,11 +196,25 @@ jobs:
               const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
               if (fileInput) {
                 await fileInput.setInputFiles(localImagePath);
-                console.log('    ✅ Uploaded via setInputFiles');
-                await sleep(2000);
-                return true;
+                await sleep(2500);
+                const uploaded = await page.evaluate(() => {
+                  return !!(
+                    document.querySelector('ms-file-attachment') ||
+                    document.querySelector('[class*="upload-thumbnail"]') ||
+                    document.querySelector('[class*="file-chip"]') ||
+                    document.querySelector('[class*="attachment"]') ||
+                    document.querySelector('rich-textarea img')
+                  );
+                }).catch(() => false);
+                if (uploaded) {
+                  console.log('    ✅ Strategy A worked: setInputFiles + thumbnail verified');
+                  return { success: true, strategy: 'Strategy A (setInputFiles)' };
+                }
+                console.log('    ⚠️ Strategy A: no thumbnail found');
               }
-            } catch (_) {}
+            } catch (e) {
+              console.log(`    ❌ Strategy A failed: ${e.message}`);
+            }
 
             // Strategy B: filechooser intercept
             try {
@@ -172,10 +229,12 @@ jobs:
                 }),
               ]);
               await fileChooser.setFiles(localImagePath);
-              console.log('    ✅ Uploaded via filechooser');
-              await sleep(2000);
-              return true;
-            } catch (_) {}
+              await sleep(2500);
+              console.log('    ✅ Strategy B worked: filechooser intercept');
+              return { success: true, strategy: 'Strategy B (filechooser)' };
+            } catch (e) {
+              console.log(`    ❌ Strategy B failed: ${e.message}`);
+            }
 
             // Strategy C: clipboard paste
             try {
@@ -211,14 +270,17 @@ jobs:
               }, dataUrl);
 
               if (pasted) {
-                await sleep(1500);
-                console.log('    ✅ Uploaded via clipboard paste');
-                return true;
+                await sleep(2000);
+                console.log('    ✅ Strategy C worked: clipboard paste');
+                return { success: true, strategy: 'Strategy C (clipboard paste)' };
               }
-            } catch (_) {}
+              console.log('    ❌ Strategy C: paste returned false');
+            } catch (e) {
+              console.log(`    ❌ Strategy C failed: ${e.message}`);
+            }
 
-            console.warn('    ❌ All upload strategies failed');
-            return false;
+            console.warn('    ❌ All strategies failed');
+            return { success: false, strategy: 'none' };
           }
 
           async function initGemini() {
@@ -244,6 +306,7 @@ jobs:
                 timeout: 60000
               });
               await sleep(3000);
+              await dismissOverlays();
               console.log("✅ Gemini Ready!");
             } catch (err) {
               console.error("❌ Failed to initialize Gemini:", err.message);
@@ -273,25 +336,29 @@ jobs:
 
             let localImagePath = null;
             try {
-              try { await page.keyboard.press('Escape'); await sleep(300); } catch (_) {}
-
               if (image_base64) {
                 localImagePath = await saveImage(image_base64);
-                const uploaded = await uploadImage(localImagePath);
-                if (!uploaded) {
-                  send({ type: 'error', error: 'Failed to upload image to Gemini' });
+                send({ type: 'info', text: '📎 Uploading image to Gemini...' });
+                const uploadResult = await uploadImage(localImagePath);
+                if (!uploadResult.success) {
+                  send({ type: 'error', error: '❌ Failed to upload image - all strategies failed' });
                   clearInterval(keepalive);
                   res.end();
                   return;
                 }
+                send({ type: 'info', text: `✅ Image uploaded via: ${uploadResult.strategy}` });
+              } else {
+                try { await page.keyboard.press('Escape'); await sleep(300); } catch (_) {}
               }
+
+              await dismissOverlays();
 
               const prevCount = await getResponseCount();
               console.log(`📊 Previous response count: ${prevCount}`);
 
               const inputSel = 'div.ql-editor[contenteditable="true"]';
               await page.waitForSelector(inputSel, { timeout: 20000 });
-              await page.click(inputSel);
+              await page.click(inputSel, { force: true });
               await sleep(200);
               await page.keyboard.press('Control+a');
               await page.keyboard.press('Delete');
