@@ -285,38 +285,25 @@ jobs:
             -H "Accept: application/vnd.github.v3+json" \
             "$API_URL")
 
-          SHA=$(echo "$API_RESPONSE" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    print(data.get('sha', ''))
-except:
-    print('')
-")
+          SHA=$(echo "$API_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('sha',''))" 2>/dev/null || echo "")
 
           echo "📋 SHA: $SHA"
           CONTENT=$(echo -n "$TUNNEL_URL" | base64 -w 0)
 
-          if [ -n "$SHA" ]; then
-            echo "📝 Updating existing file..."
-            PAYLOAD=$(python3 -c "
-import json
-print(json.dumps({
-    'message': '🔗 Update tunnel URL [skip ci]',
-    'content': '$CONTENT',
-    'sha': '$SHA'
-}))
-")
-          else
-            echo "📝 Creating new file..."
-            PAYLOAD=$(python3 -c "
-import json
-print(json.dumps({
-    'message': '🔗 Create tunnel URL [skip ci]',
-    'content': '$CONTENT'
-}))
-")
-          fi
+          cat > payload.py << 'PYEOF'
+import json, os
+sha = os.environ.get("SHA", "")
+content = os.environ.get("CONTENT", "")
+payload = {
+    "message": "Update tunnel URL [skip ci]",
+    "content": content
+}
+if sha:
+    payload["sha"] = sha
+print(json.dumps(payload))
+          PYEOF
+
+          PAYLOAD=$(SHA="$SHA" CONTENT="$CONTENT" python3 payload.py)
 
           HTTP_STATUS=$(curl -s -o push_result.json -w "%{http_code}" -X PUT \
             -H "Authorization: token $CENTRAL_REPO_TOKEN" \
