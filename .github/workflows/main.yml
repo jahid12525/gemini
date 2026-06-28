@@ -33,7 +33,7 @@ jobs:
       - name: 🖥️ Start Virtual Display (Xvfb)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y xvfb ffmpeg
           Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
           sleep 3
           echo "DISPLAY=:99" >> $GITHUB_ENV
@@ -64,6 +64,15 @@ jobs:
           cloudflared --version
           echo "✅ cloudflared installed!"
 
+      - name: 🎥 Start Screen Recording
+        run: |
+          mkdir -p /tmp/recordings /tmp/screenshots
+          ffmpeg -f x11grab -r 10 -s 1920x1080 -i :99 \
+            -vcodec libx264 -preset ultrafast -crf 30 \
+            /tmp/recordings/session.mp4 > /tmp/ffmpeg.log 2>&1 &
+          echo $! > /tmp/ffmpeg.pid
+          echo "✅ Screen recording started (PID: $(cat /tmp/ffmpeg.pid))"
+
       - name: 🛠️ Create Gemini API Server
         run: |
           cat > api_server.mjs << 'SERVER_EOF'
@@ -78,8 +87,17 @@ jobs:
 
           let context, page;
           const PORT = 3000;
+          let screenshotCount = 0;
 
           function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+          async function takeScreenshot(label) {
+            try {
+              const filename = `/tmp/screenshots/${String(screenshotCount++).padStart(3,'0')}_${label}.png`;
+              await page.screenshot({ path: filename, fullPage: false });
+              console.log(`    📸 ${filename}`);
+            } catch (_) {}
+          }
 
           async function getResponseCount() {
             return page.evaluate(() => {
@@ -142,22 +160,154 @@ jobs:
           }
 
           async function uploadImage(localImagePath) {
+            console.log(`    📎 Uploading: ${path.basename(localImagePath)}`);
+
+            // Log all buttons for debugging
+            const btns = await page.evaluate(() =>
+              [...document.querySelectorAll('button[aria-label]')]
+                .map(b => b.getAttribute('aria-label'))
+            ).catch(() => []);
+            console.log(`    🔍 Buttons: ${JSON.stringify(btns)}`);
+            await takeScreenshot('upload_01_before');
+
             const uploadBtnSelectors = [
+              'button[aria-label="Upload & tools"]',
               'button[aria-label="Open upload file menu"]',
               'button[aria-label="Upload file"]',
               'button[aria-label="Add image"]',
               'button[aria-label="Attach files"]',
+              'button[aria-label="Add files"]',
             ];
+
+            let uploadClicked = false;
             for (const sel of uploadBtnSelectors) {
               try {
                 const btn = await page.$(sel);
-                if (btn) { await btn.click(); await sleep(500); break; }
+                if (btn) {
+                  await btn.click();
+                  console.log(`    🖱️ Clicked: ${sel}`);
+                  await sleep(1500);
+                  await takeScreenshot('upload_02_after_btn');
+                  uploadClicked = true;
+                  break;
+                }
               } catch (_) {}
             }
+
+            // Fallback: partial label match
+            if (!uploadClicked) {
+              uploadClicked = await page.evaluate(() => {
+                const btn = [...document.querySelectorAll('button[aria-label]')].find(el => {
+                  const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                  return label.includes('upload') || label.includes('attach') ||
+                         label.includes('tools') || label.includes('add files') ||
+                         label.includes('add image');
+                });
+                if (btn) { btn.click(); return true; }
+                return false;
+              }).catch(() => false);
+              if (uploadClicked) {
+                console.log('    🖱️ Clicked via partial match');
+                await sleep(1500);
+                await takeScreenshot('upload_02_partial_match');
+              }
+            }
+
+            if (!uploadClicked) {
+              console.log('    ⚠️ No upload button found');
+              await takeScreenshot('upload_02_no_btn');
+            }
+
+            // Click submenu if appeared
+            if (uploadClicked) {
+              const submenuItems = await page.evaluate(() =>
+                [...document.querySelectorAll('button, li, [role="menuitem"]')]
+                  .filter(el => {
+                    const t = (el.innerText || el.textContent || '').toLowerCase().trim();
+                    return t.includes('upload') || t.includes('computer') || t.includes('device');
+                  })
+                  .map(el => (el.innerText || el.textContent || '').trim())
+              ).catch(() => []);
+              console.log(`    🔍 Submenu items: ${JSON.stringify(submenuItems)}`);
+
+              const submenuSelectors = [
+                'button:has-text("Upload from computer")',
+                'button:has-text("Upload from device")',
+                'button:has-text("Upload image")',
+                'button:has-text("Upload")',
+                '[role="menuitem"]:has-text("Upload")',
+                'li:has-text("Upload from computer")',
+                'li:has-text("Upload")',
+              ];
+              for (const sel of submenuSelectors) {
+                try {
+                  const item = await page.$(sel);
+                  if (item) {
+                    await item.click();
+                    console.log(`    🖱️ Submenu: ${sel}`);
+                    await sleep(1000);
+                    await takeScreenshot('upload_03_submenu');
+                    break;
+                  }
+                } catch (_) {}
+              }
+            }
+
+            // Strategy A: setInputFiles
             try {
-              const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
-              if (fileInput) { await fileInput.setInputFiles(localImagePath); await sleep(2000); }
-            } catch (_) {}
+              console.log('    🔄 Strategy A: setInputFiles...');
+              const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 8000 });
+              if (fileInput) {
+                await fileInput.setInputFiles(localImagePath);
+                await sleep(3000);
+                await takeScreenshot('upload_04_strategy_a');
+                console.log('    ✅ Strategy A worked');
+                return { success: true, strategy: 'Strategy A (setInputFiles)' };
+              }
+            } catch (e) {
+              console.log(`    ❌ Strategy A failed: ${e.message}`);
+              await takeScreenshot('upload_04_strategy_a_fail');
+            }
+
+            // Strategy B: filechooser intercept
+            try {
+              console.log('    🔄 Strategy B: filechooser...');
+              const [fileChooser] = await Promise.all([
+                page.waitForEvent('filechooser', { timeout: 8000 }),
+                (async () => {
+                  for (const sel of uploadBtnSelectors) {
+                    try {
+                      const btn = await page.$(sel);
+                      if (btn) { await btn.click(); await sleep(500); break; }
+                    } catch (_) {}
+                  }
+                  await sleep(500);
+                  for (const sel of [
+                    'button:has-text("Upload from computer")',
+                    'button:has-text("Upload from device")',
+                    'button:has-text("Upload")',
+                    'li:has-text("Upload")',
+                  ]) {
+                    try {
+                      const item = await page.$(sel);
+                      if (item) { await item.click(); break; }
+                    } catch (_) {}
+                  }
+                })(),
+              ]);
+              await fileChooser.setFiles(localImagePath);
+              await sleep(3000);
+              await takeScreenshot('upload_04_strategy_b');
+              console.log('    ✅ Strategy B worked');
+              return { success: true, strategy: 'Strategy B (filechooser)' };
+            } catch (e) {
+              console.log(`    ❌ Strategy B failed: ${e.message}`);
+              await takeScreenshot('upload_04_strategy_b_fail');
+            }
+
+            await takeScreenshot('upload_05_all_failed');
+            console.warn('    ❌ All strategies failed');
+            return { success: false, strategy: 'none' };
           }
 
           async function initGemini() {
@@ -183,6 +333,7 @@ jobs:
                 timeout: 60000
               });
               await sleep(3000);
+              await takeScreenshot('00_gemini_ready');
               console.log("✅ Gemini Ready!");
             } catch (err) {
               console.error("❌ Failed to initialize Gemini:", err.message);
@@ -204,7 +355,6 @@ jobs:
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.flushHeaders();
 
-            // Send keepalive ping every 15s to prevent connection drop
             const keepalive = setInterval(() => {
               try { res.write(': ping\n\n'); } catch (_) {}
             }, 15000);
@@ -217,28 +367,35 @@ jobs:
 
               if (image_base64) {
                 localImagePath = await saveImage(image_base64);
-                await uploadImage(localImagePath);
+                send({ type: 'info', text: '📎 Uploading image to Gemini...' });
+                const uploadResult = await uploadImage(localImagePath);
+                if (!uploadResult.success) {
+                  send({ type: 'error', error: '❌ Failed to upload image - all strategies failed' });
+                  clearInterval(keepalive);
+                  res.end();
+                  return;
+                }
+                send({ type: 'info', text: `✅ Image uploaded via: ${uploadResult.strategy}` });
               }
 
-              // Count responses BEFORE submitting
               const prevCount = await getResponseCount();
               console.log(`📊 Previous response count: ${prevCount}`);
 
               const inputSel = 'div.ql-editor[contenteditable="true"]';
               await page.waitForSelector(inputSel, { timeout: 20000 });
-              await page.click(inputSel);
+              await page.click(inputSel, { force: true });
               await sleep(200);
               await page.keyboard.press('Control+a');
               await page.keyboard.press('Delete');
               await sleep(300);
               await page.keyboard.insertText(prompt);
               await sleep(600);
+              await takeScreenshot('prompt_before_submit');
               await page.keyboard.press('Enter');
 
               send({ type: 'start' });
               console.log(`📤 Prompt: ${prompt.substring(0, 50)}...`);
 
-              // Wait for NEW response to appear (longer timeout for complex prompts)
               const deadline = Date.now() + 180000;
               let newResponseAppeared = false;
 
@@ -250,21 +407,18 @@ jobs:
                   console.log(`✅ New response detected! Count: ${currentCount}`);
                   break;
                 }
-                // Also check if Gemini is loading/thinking
                 const loading = await isGeminiLoading();
-                if (loading) {
-                  console.log("⏳ Gemini is thinking...");
-                }
+                if (loading) console.log("⏳ Gemini is thinking...");
               }
 
               if (!newResponseAppeared) {
+                await takeScreenshot('no_response');
                 send({ type: 'error', error: 'New response did not appear in time' });
                 clearInterval(keepalive);
                 res.end();
                 return;
               }
 
-              // Stream the NEW response only
               let lastSentText = '';
               let lastSeenText = '';
               let stableCount = 0;
@@ -289,11 +443,13 @@ jobs:
                 }
               }
 
+              await takeScreenshot('response_complete');
               send({ type: 'done', full_response: lastSentText });
               console.log("✅ Response complete!");
 
             } catch (err) {
               console.error("❌ Error:", err.message);
+              await takeScreenshot('error_state');
               send({ type: 'error', error: err.message });
             } finally {
               clearInterval(keepalive);
@@ -391,3 +547,30 @@ jobs:
           echo "=============================================="
 
           node api_server.mjs
+
+      - name: 🛑 Stop Screen Recording
+        if: always()
+        run: |
+          if [ -f /tmp/ffmpeg.pid ]; then
+            kill $(cat /tmp/ffmpeg.pid) 2>/dev/null || true
+            sleep 3
+            echo "✅ Recording stopped"
+          fi
+
+      - name: 📸 Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: /tmp/screenshots/
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: 🎥 Upload Screen Recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screen-recording
+          path: /tmp/recordings/
+          if-no-files-found: warn
+          retention-days: 3
