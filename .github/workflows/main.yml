@@ -290,20 +290,11 @@ jobs:
           echo "📋 SHA: $SHA"
           CONTENT=$(echo -n "$TUNNEL_URL" | base64 -w 0)
 
-          cat > payload.py << 'PYEOF'
-import json, os
-sha = os.environ.get("SHA", "")
-content = os.environ.get("CONTENT", "")
-payload = {
-    "message": "Update tunnel URL [skip ci]",
-    "content": content
-}
-if sha:
-    payload["sha"] = sha
-print(json.dumps(payload))
-          PYEOF
-
-          PAYLOAD=$(SHA="$SHA" CONTENT="$CONTENT" python3 payload.py)
+          if [ -n "$SHA" ]; then
+            PAYLOAD="{\"message\":\"Update tunnel URL [skip ci]\",\"content\":\"${CONTENT}\",\"sha\":\"${SHA}\"}"
+          else
+            PAYLOAD="{\"message\":\"Create tunnel URL [skip ci]\",\"content\":\"${CONTENT}\"}"
+          fi
 
           HTTP_STATUS=$(curl -s -o push_result.json -w "%{http_code}" -X PUT \
             -H "Authorization: token $CENTRAL_REPO_TOKEN" \
