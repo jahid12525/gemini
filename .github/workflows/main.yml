@@ -33,7 +33,7 @@ jobs:
       - name: 🖥️ Start Virtual Display (Xvfb)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y xvfb ffmpeg
           Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
           sleep 3
           echo "DISPLAY=:99" >> $GITHUB_ENV
@@ -64,6 +64,15 @@ jobs:
           cloudflared --version
           echo "✅ cloudflared installed!"
 
+      - name: 🎥 Start Screen Recording
+        run: |
+          mkdir -p /tmp/recordings /tmp/screenshots
+          ffmpeg -f x11grab -r 10 -s 1920x1080 -i :99 \
+            -vcodec libx264 -preset ultrafast -crf 30 \
+            /tmp/recordings/session.mp4 > /tmp/ffmpeg.log 2>&1 &
+          echo $! > /tmp/ffmpeg.pid
+          echo "✅ Screen recording started (PID: $(cat /tmp/ffmpeg.pid))"
+
       - name: 🛠️ Create Gemini API Server
         run: |
           cat > api_server.mjs << 'SERVER_EOF'
@@ -78,8 +87,17 @@ jobs:
 
           let context, page;
           const PORT = 3000;
+          let screenshotCount = 0;
 
           function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+          async function takeScreenshot(label) {
+            try {
+              const filename = `/tmp/screenshots/${String(screenshotCount++).padStart(3,'0')}_${label}.png`;
+              await page.screenshot({ path: filename, fullPage: false });
+              console.log(`    📸 Screenshot: ${filename}`);
+            } catch (_) {}
+          }
 
           async function getResponseCount() {
             return page.evaluate(() => {
@@ -171,6 +189,14 @@ jobs:
             });
             await sleep(2000);
             await dismissOverlays();
+            await takeScreenshot('01_before_upload');
+
+            // Log all aria-label buttons for debugging
+            const btns = await page.evaluate(() =>
+              [...document.querySelectorAll('button[aria-label]')]
+                .map(b => b.getAttribute('aria-label'))
+            ).catch(() => []);
+            console.log(`    🔍 Available buttons: ${JSON.stringify(btns)}`);
 
             const uploadBtnSelectors = [
               'button[aria-label="Open upload file menu"]',
@@ -179,16 +205,24 @@ jobs:
               'button[aria-label="Attach files"]',
             ];
 
+            let uploadClicked = false;
             for (const sel of uploadBtnSelectors) {
               try {
                 const btn = await page.$(sel);
                 if (btn) {
                   await btn.click();
                   console.log(`    🖱️ Clicked: ${sel}`);
-                  await sleep(500);
+                  await sleep(1000);
+                  await takeScreenshot('02_after_upload_btn_click');
+                  uploadClicked = true;
                   break;
                 }
               } catch (_) {}
+            }
+
+            if (!uploadClicked) {
+              console.log('    ⚠️ No upload button found via aria-label');
+              await takeScreenshot('02_no_upload_btn');
             }
 
             // Strategy A: setInputFiles
@@ -197,6 +231,7 @@ jobs:
               if (fileInput) {
                 await fileInput.setInputFiles(localImagePath);
                 await sleep(2500);
+                await takeScreenshot('03_after_setInputFiles');
                 const uploaded = await page.evaluate(() => {
                   return !!(
                     document.querySelector('ms-file-attachment') ||
@@ -208,6 +243,7 @@ jobs:
                 }).catch(() => false);
                 if (uploaded) {
                   console.log('    ✅ Strategy A worked: setInputFiles + thumbnail verified');
+                  await takeScreenshot('03_strategy_a_success');
                   return { success: true, strategy: 'Strategy A (setInputFiles)' };
                 }
                 console.log('    ⚠️ Strategy A: no thumbnail found');
@@ -230,6 +266,7 @@ jobs:
               ]);
               await fileChooser.setFiles(localImagePath);
               await sleep(2500);
+              await takeScreenshot('03_strategy_b_success');
               console.log('    ✅ Strategy B worked: filechooser intercept');
               return { success: true, strategy: 'Strategy B (filechooser)' };
             } catch (e) {
@@ -269,16 +306,34 @@ jobs:
                 return false;
               }, dataUrl);
 
-              if (pasted) {
-                await sleep(2000);
-                console.log('    ✅ Strategy C worked: clipboard paste');
+              await sleep(2000);
+              await takeScreenshot('03_after_clipboard_paste');
+
+              // Verify clipboard paste actually attached image
+              const pasteVerified = await page.evaluate(() => {
+                return !!(
+                  document.querySelector('ms-file-attachment') ||
+                  document.querySelector('[class*="upload-thumbnail"]') ||
+                  document.querySelector('[class*="file-chip"]') ||
+                  document.querySelector('[class*="attachment"]') ||
+                  document.querySelector('rich-textarea img') ||
+                  document.querySelector('[class*="image-chip"]') ||
+                  document.querySelector('[class*="ImageChip"]')
+                );
+              }).catch(() => false);
+
+              console.log(`    🔍 Clipboard paste verified: ${pasteVerified}`);
+
+              if (pasted && pasteVerified) {
+                console.log('    ✅ Strategy C worked: clipboard paste + verified');
                 return { success: true, strategy: 'Strategy C (clipboard paste)' };
               }
-              console.log('    ❌ Strategy C: paste returned false');
+              console.log('    ❌ Strategy C: paste ran but image not visible in UI');
             } catch (e) {
               console.log(`    ❌ Strategy C failed: ${e.message}`);
             }
 
+            await takeScreenshot('03_all_strategies_failed');
             console.warn('    ❌ All strategies failed');
             return { success: false, strategy: 'none' };
           }
@@ -307,6 +362,7 @@ jobs:
               });
               await sleep(3000);
               await dismissOverlays();
+              await takeScreenshot('00_gemini_ready');
               console.log("✅ Gemini Ready!");
             } catch (err) {
               console.error("❌ Failed to initialize Gemini:", err.message);
@@ -352,6 +408,7 @@ jobs:
               }
 
               await dismissOverlays();
+              await takeScreenshot('04_before_typing');
 
               const prevCount = await getResponseCount();
               console.log(`📊 Previous response count: ${prevCount}`);
@@ -365,6 +422,7 @@ jobs:
               await sleep(300);
               await page.keyboard.insertText(prompt);
               await sleep(600);
+              await takeScreenshot('05_before_submit');
               await page.keyboard.press('Enter');
 
               send({ type: 'start' });
@@ -384,6 +442,7 @@ jobs:
               }
 
               if (!newResponseAppeared) {
+                await takeScreenshot('06_no_response');
                 send({ type: 'error', error: 'No response from Gemini' });
                 clearInterval(keepalive);
                 res.end();
@@ -414,11 +473,13 @@ jobs:
                 }
               }
 
+              await takeScreenshot('07_response_complete');
               send({ type: 'done', full_response: lastSentText });
               console.log("✅ Response complete!");
 
             } catch (err) {
               console.error("❌ Error:", err.message);
+              await takeScreenshot('error_state');
               send({ type: 'error', error: err.message });
             } finally {
               clearInterval(keepalive);
@@ -516,3 +577,30 @@ jobs:
           echo "=============================================="
 
           node api_server.mjs
+
+      - name: 🛑 Stop Screen Recording
+        if: always()
+        run: |
+          if [ -f /tmp/ffmpeg.pid ]; then
+            kill $(cat /tmp/ffmpeg.pid) 2>/dev/null || true
+            sleep 3
+            echo "✅ Recording stopped"
+          fi
+
+      - name: 📸 Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: /tmp/screenshots/
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: 🎥 Upload Screen Recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screen-recording
+          path: /tmp/recordings/
+          if-no-files-found: warn
+          retention-days: 3
