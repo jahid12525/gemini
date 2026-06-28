@@ -81,6 +81,49 @@ jobs:
 
           function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+          async function getLatestResponse() {
+            return page.evaluate(() => {
+              const selectors = [
+                'div[id^="model-response-message-content"]',
+                'message-content',
+                'div.message-content',
+                'model-response'
+              ];
+              let lastEl = null;
+              for (const sel of selectors) {
+                const els = document.querySelectorAll(sel);
+                if (els.length > 0) lastEl = els[els.length - 1];
+              }
+              return lastEl ? (lastEl.innerText || lastEl.textContent || '').trim() : '';
+            }).catch(() => '');
+          }
+
+          async function saveImage(image_base64) {
+            const buffer = Buffer.from(image_base64.replace(/^data:image\/\w+;base64,/, ""), 'base64');
+            const localImagePath = path.join(os.tmpdir(), `upload_${Date.now()}.jpg`);
+            fs.writeFileSync(localImagePath, buffer);
+            return localImagePath;
+          }
+
+          async function uploadImage(localImagePath) {
+            const uploadBtnSelectors = [
+              'button[aria-label="Open upload file menu"]',
+              'button[aria-label="Upload file"]',
+              'button[aria-label="Add image"]',
+              'button[aria-label="Attach files"]',
+            ];
+            for (const sel of uploadBtnSelectors) {
+              try {
+                const btn = await page.$(sel);
+                if (btn) { await btn.click(); await sleep(500); break; }
+              } catch (_) {}
+            }
+            try {
+              const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+              if (fileInput) { await fileInput.setInputFiles(localImagePath); await sleep(2000); }
+            } catch (_) {}
+          }
+
           async function initGemini() {
             console.log("⚡ Launching Chrome...");
             try {
@@ -115,36 +158,27 @@ jobs:
             res.json({ status: 'ok', timestamp: new Date().toISOString() });
           });
 
+          // ── Single streaming endpoint ──
           app.post('/api/gemini', async (req, res) => {
             const { prompt, image_base64 } = req.body;
             if (!prompt) return res.status(400).json({ error: "Prompt is required" });
 
-            console.log(`📩 Request: ${prompt.substring(0, 50)}...`);
-            let localImagePath = null;
+            // SSE headers
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.flushHeaders();
 
+            const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+            let localImagePath = null;
             try {
               try { await page.keyboard.press('Escape'); await sleep(300); } catch (_) {}
 
               if (image_base64) {
-                const buffer = Buffer.from(image_base64.replace(/^data:image\/\w+;base64,/, ""), 'base64');
-                localImagePath = path.join(os.tmpdir(), `upload_${Date.now()}.jpg`);
-                fs.writeFileSync(localImagePath, buffer);
-                const uploadBtnSelectors = [
-                  'button[aria-label="Open upload file menu"]',
-                  'button[aria-label="Upload file"]',
-                  'button[aria-label="Add image"]',
-                  'button[aria-label="Attach files"]',
-                ];
-                for (const sel of uploadBtnSelectors) {
-                  try {
-                    const btn = await page.$(sel);
-                    if (btn) { await btn.click(); await sleep(500); break; }
-                  } catch (_) {}
-                }
-                try {
-                  const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
-                  if (fileInput) { await fileInput.setInputFiles(localImagePath); await sleep(2000); }
-                } catch (_) {}
+                localImagePath = await saveImage(image_base64);
+                await uploadImage(localImagePath);
               }
 
               const inputSel = 'div.ql-editor[contenteditable="true"]';
@@ -157,42 +191,48 @@ jobs:
               await page.keyboard.insertText(prompt);
               await sleep(600);
               await page.keyboard.press('Enter');
-              console.log("📤 Prompt submitted...");
+
+              send({ type: 'start' });
+              console.log(`📤 Prompt submitted: ${prompt.substring(0, 50)}...`);
 
               const deadline = Date.now() + 120000;
-              let finalResponseText = '', lastSeenText = '', stableCount = 0;
+              let lastSentText = '';
+              let lastSeenText = '';
+              let stableCount = 0;
 
               while (Date.now() < deadline) {
-                await sleep(2000);
-                const latestText = await page.evaluate(() => {
-                  const selectors = [
-                    'div[id^="model-response-message-content"]',
-                    'message-content',
-                    'div.message-content',
-                    'model-response'
-                  ];
-                  let lastEl = null;
-                  for (const sel of selectors) {
-                    const els = document.querySelectorAll(sel);
-                    if (els.length > 0) lastEl = els[els.length - 1];
-                  }
-                  return lastEl ? (lastEl.innerText || lastEl.textContent || '').trim() : '';
-                }).catch(() => '');
+                await sleep(300);
 
+                const latestText = await getLatestResponse();
                 if (!latestText) continue;
-                if (latestText === lastSeenText) {
+
+                if (latestText.length > lastSentText.length) {
+                  // Send only new characters as delta
+                  const delta = latestText.slice(lastSentText.length);
+                  send({ type: 'delta', text: delta });
+                  lastSentText = latestText;
+                  lastSeenText = latestText;
+                  stableCount = 0;
+                } else if (latestText === lastSeenText) {
                   stableCount++;
-                  if (stableCount >= 3) { finalResponseText = latestText; break; }
-                } else { lastSeenText = latestText; stableCount = 0; }
+                  if (stableCount >= 6) {
+                    // 6 x 300ms = 1.8s no change = response complete
+                    break;
+                  }
+                } else {
+                  lastSeenText = latestText;
+                  stableCount = 0;
+                }
               }
 
-              const result = finalResponseText || lastSeenText;
-              if (!result) return res.status(504).json({ success: false, error: "Timeout: No response from Gemini" });
-              res.json({ success: true, response: result });
+              send({ type: 'done', full_response: lastSentText });
+              console.log("✅ Response complete!");
+              res.end();
 
             } catch (err) {
               console.error("❌ Error:", err.message);
-              res.status(500).json({ success: false, error: err.message });
+              send({ type: 'error', error: err.message });
+              res.end();
             } finally {
               if (localImagePath && fs.existsSync(localImagePath)) {
                 try { fs.unlinkSync(localImagePath); } catch (_) {}
@@ -243,7 +283,6 @@ jobs:
 
           echo "✅ Tunnel URL: $TUNNEL_URL"
 
-          # ── Push URL to central repo via GitHub API ──
           CENTRAL_REPO="jahid12525/gemini-url"
           FILE_PATH="tunnel_url.txt"
           API_URL="https://api.github.com/repos/$CENTRAL_REPO/contents/$FILE_PATH"
@@ -277,13 +316,10 @@ jobs:
 
           echo "=============================================="
           echo "✅ CLOUDFLARE TUNNEL IS LIVE!"
-          echo ""
           echo "🔗 PUBLIC URL  : $TUNNEL_URL"
           echo "📡 API Endpoint: $TUNNEL_URL/api/gemini"
           echo "❤️  Health Check: $TUNNEL_URL/health"
-          echo ""
-          echo "📌 FIXED URL (never changes):"
-          echo "   https://raw.githubusercontent.com/$CENTRAL_REPO/main/$FILE_PATH"
+          echo "📌 FIXED URL   : https://raw.githubusercontent.com/$CENTRAL_REPO/main/$FILE_PATH"
           echo "=============================================="
 
           node api_server.mjs
