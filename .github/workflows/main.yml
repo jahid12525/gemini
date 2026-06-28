@@ -158,12 +158,10 @@ jobs:
             res.json({ status: 'ok', timestamp: new Date().toISOString() });
           });
 
-          // ── Single streaming endpoint ──
           app.post('/api/gemini', async (req, res) => {
             const { prompt, image_base64 } = req.body;
             if (!prompt) return res.status(400).json({ error: "Prompt is required" });
 
-            // SSE headers
             res.setHeader('Content-Type', 'text/event-stream');
             res.setHeader('Cache-Control', 'no-cache');
             res.setHeader('Connection', 'keep-alive');
@@ -193,7 +191,7 @@ jobs:
               await page.keyboard.press('Enter');
 
               send({ type: 'start' });
-              console.log(`📤 Prompt submitted: ${prompt.substring(0, 50)}...`);
+              console.log(`📤 Prompt: ${prompt.substring(0, 50)}...`);
 
               const deadline = Date.now() + 120000;
               let lastSentText = '';
@@ -202,12 +200,10 @@ jobs:
 
               while (Date.now() < deadline) {
                 await sleep(300);
-
                 const latestText = await getLatestResponse();
                 if (!latestText) continue;
 
                 if (latestText.length > lastSentText.length) {
-                  // Send only new characters as delta
                   const delta = latestText.slice(lastSentText.length);
                   send({ type: 'delta', text: delta });
                   lastSentText = latestText;
@@ -215,10 +211,7 @@ jobs:
                   stableCount = 0;
                 } else if (latestText === lastSeenText) {
                   stableCount++;
-                  if (stableCount >= 6) {
-                    // 6 x 300ms = 1.8s no change = response complete
-                    break;
-                  }
+                  if (stableCount >= 6) break;
                 } else {
                   lastSeenText = latestText;
                   stableCount = 0;
@@ -287,17 +280,42 @@ jobs:
           FILE_PATH="tunnel_url.txt"
           API_URL="https://api.github.com/repos/$CENTRAL_REPO/contents/$FILE_PATH"
 
-          SHA=$(curl -s \
+          API_RESPONSE=$(curl -s \
             -H "Authorization: token $CENTRAL_REPO_TOKEN" \
             -H "Accept: application/vnd.github.v3+json" \
-            "$API_URL" | grep -o '"sha":"[^"]*"' | head -1 | cut -d'"' -f4)
+            "$API_URL")
 
+          SHA=$(echo "$API_RESPONSE" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('sha', ''))
+except:
+    print('')
+")
+
+          echo "📋 SHA: $SHA"
           CONTENT=$(echo -n "$TUNNEL_URL" | base64 -w 0)
 
           if [ -n "$SHA" ]; then
-            PAYLOAD="{\"message\":\"🔗 Update tunnel URL [skip ci]\",\"content\":\"$CONTENT\",\"sha\":\"$SHA\"}"
+            echo "📝 Updating existing file..."
+            PAYLOAD=$(python3 -c "
+import json
+print(json.dumps({
+    'message': '🔗 Update tunnel URL [skip ci]',
+    'content': '$CONTENT',
+    'sha': '$SHA'
+}))
+")
           else
-            PAYLOAD="{\"message\":\"🔗 Create tunnel URL [skip ci]\",\"content\":\"$CONTENT\"}"
+            echo "📝 Creating new file..."
+            PAYLOAD=$(python3 -c "
+import json
+print(json.dumps({
+    'message': '🔗 Create tunnel URL [skip ci]',
+    'content': '$CONTENT'
+}))
+")
           fi
 
           HTTP_STATUS=$(curl -s -o push_result.json -w "%{http_code}" -X PUT \
@@ -312,6 +330,7 @@ jobs:
           else
             echo "❌ Failed to update central repo (HTTP $HTTP_STATUS)"
             cat push_result.json
+            exit 1
           fi
 
           echo "=============================================="
