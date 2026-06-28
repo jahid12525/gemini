@@ -116,6 +116,24 @@ jobs:
             }).catch(() => '');
           }
 
+          async function isGeminiLoading() {
+            return page.evaluate(() => {
+              const loadingSelectors = [
+                '.loading-indicator',
+                '[data-is-loading="true"]',
+                'div[aria-label="Loading"]',
+                '.progress-container',
+                'div.thinking',
+                'model-response.loading',
+              ];
+              for (const sel of loadingSelectors) {
+                if (document.querySelector(sel)) return true;
+              }
+              const html = document.body.innerHTML;
+              return html.includes('loading') || html.includes('Thinking') || html.includes('...');
+            }).catch(() => false);
+          }
+
           async function saveImage(image_base64) {
             const buffer = Buffer.from(image_base64.replace(/^data:image\/\w+;base64,/, ""), 'base64');
             const localImagePath = path.join(os.tmpdir(), `upload_${Date.now()}.jpg`);
@@ -186,6 +204,11 @@ jobs:
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.flushHeaders();
 
+            // Send keepalive ping every 15s to prevent connection drop
+            const keepalive = setInterval(() => {
+              try { res.write(': ping\n\n'); } catch (_) {}
+            }, 15000);
+
             const send = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
             let localImagePath = null;
@@ -215,22 +238,28 @@ jobs:
               send({ type: 'start' });
               console.log(`📤 Prompt: ${prompt.substring(0, 50)}...`);
 
-              // Wait for NEW response to appear
-              const deadline = Date.now() + 120000;
+              // Wait for NEW response to appear (longer timeout for complex prompts)
+              const deadline = Date.now() + 180000;
               let newResponseAppeared = false;
 
               while (Date.now() < deadline) {
-                await sleep(300);
+                await sleep(500);
                 const currentCount = await getResponseCount();
                 if (currentCount > prevCount) {
                   newResponseAppeared = true;
                   console.log(`✅ New response detected! Count: ${currentCount}`);
                   break;
                 }
+                // Also check if Gemini is loading/thinking
+                const loading = await isGeminiLoading();
+                if (loading) {
+                  console.log("⏳ Gemini is thinking...");
+                }
               }
 
               if (!newResponseAppeared) {
                 send({ type: 'error', error: 'New response did not appear in time' });
+                clearInterval(keepalive);
                 res.end();
                 return;
               }
@@ -253,7 +282,7 @@ jobs:
                   stableCount = 0;
                 } else if (latestText === lastSeenText) {
                   stableCount++;
-                  if (stableCount >= 6) break;
+                  if (stableCount >= 8) break;
                 } else {
                   lastSeenText = latestText;
                   stableCount = 0;
@@ -262,13 +291,13 @@ jobs:
 
               send({ type: 'done', full_response: lastSentText });
               console.log("✅ Response complete!");
-              res.end();
 
             } catch (err) {
               console.error("❌ Error:", err.message);
               send({ type: 'error', error: err.message });
-              res.end();
             } finally {
+              clearInterval(keepalive);
+              res.end();
               if (localImagePath && fs.existsSync(localImagePath)) {
                 try { fs.unlinkSync(localImagePath); } catch (_) {}
               }
