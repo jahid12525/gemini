@@ -116,48 +116,109 @@ jobs:
             }).catch(() => '');
           }
 
-          async function isGeminiLoading() {
-            return page.evaluate(() => {
-              const loadingSelectors = [
-                '.loading-indicator',
-                '[data-is-loading="true"]',
-                'div[aria-label="Loading"]',
-                '.progress-container',
-                'div.thinking',
-                'model-response.loading',
-              ];
-              for (const sel of loadingSelectors) {
-                if (document.querySelector(sel)) return true;
-              }
-              const html = document.body.innerHTML;
-              return html.includes('loading') || html.includes('Thinking') || html.includes('...');
-            }).catch(() => false);
-          }
-
           async function saveImage(image_base64) {
             const buffer = Buffer.from(image_base64.replace(/^data:image\/\w+;base64,/, ""), 'base64');
-            const localImagePath = path.join(os.tmpdir(), `upload_${Date.now()}.jpg`);
+            const mimeMatch = image_base64.match(/^data:([^;]+);base64,/);
+            const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+            const ext = mime.split('/')[1]?.replace('jpeg', 'jpg') || 'jpg';
+            const localImagePath = path.join(os.tmpdir(), `upload_${Date.now()}.${ext}`);
             fs.writeFileSync(localImagePath, buffer);
             return localImagePath;
           }
 
           async function uploadImage(localImagePath) {
+            console.log(`    📎 Uploading: ${path.basename(localImagePath)}`);
+
             const uploadBtnSelectors = [
               'button[aria-label="Open upload file menu"]',
               'button[aria-label="Upload file"]',
               'button[aria-label="Add image"]',
               'button[aria-label="Attach files"]',
             ];
+
             for (const sel of uploadBtnSelectors) {
               try {
                 const btn = await page.$(sel);
-                if (btn) { await btn.click(); await sleep(500); break; }
+                if (btn) {
+                  await btn.click();
+                  console.log(`    🖱️ Clicked: ${sel}`);
+                  await sleep(500);
+                  break;
+                }
               } catch (_) {}
             }
+
+            // Strategy A: setInputFiles
             try {
               const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
-              if (fileInput) { await fileInput.setInputFiles(localImagePath); await sleep(2000); }
+              if (fileInput) {
+                await fileInput.setInputFiles(localImagePath);
+                console.log('    ✅ Uploaded via setInputFiles');
+                await sleep(2000);
+                return true;
+              }
             } catch (_) {}
+
+            // Strategy B: filechooser intercept
+            try {
+              const [fileChooser] = await Promise.all([
+                page.waitForEvent('filechooser', { timeout: 4000 }),
+                page.evaluate(() => {
+                  const btn = [...document.querySelectorAll('button, [role="button"]')].find(el => {
+                    const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                    return label.includes('upload') || label.includes('attach') || label.includes('add image');
+                  });
+                  if (btn) btn.click();
+                }),
+              ]);
+              await fileChooser.setFiles(localImagePath);
+              console.log('    ✅ Uploaded via filechooser');
+              await sleep(2000);
+              return true;
+            } catch (_) {}
+
+            // Strategy C: clipboard paste
+            try {
+              const buffer = fs.readFileSync(localImagePath);
+              const base64 = buffer.toString('base64');
+              const mimeType = localImagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
+              const dataUrl = `data:${mimeType};base64,${base64}`;
+
+              const pasted = await page.evaluate(async (dataUrl) => {
+                function dataUrlToFile(dataUrl, name, type) {
+                  const arr = dataUrl.split(',');
+                  const bstr = atob(arr[1]);
+                  let n = bstr.length;
+                  const u8 = new Uint8Array(n);
+                  while (n--) u8[n] = bstr.charCodeAt(n);
+                  return new File([u8], name, { type });
+                }
+                const file = dataUrlToFile(dataUrl, 'image.jpg', 'image/jpeg');
+                const dt = new DataTransfer();
+                dt.items.add(file);
+                const editor =
+                  document.querySelector('rich-textarea [contenteditable="true"]') ||
+                  document.querySelector('.ql-editor') ||
+                  document.querySelector('[contenteditable="true"]');
+                if (editor) {
+                  editor.focus();
+                  editor.dispatchEvent(new ClipboardEvent('paste', {
+                    bubbles: true, cancelable: true, clipboardData: dt
+                  }));
+                  return true;
+                }
+                return false;
+              }, dataUrl);
+
+              if (pasted) {
+                await sleep(1500);
+                console.log('    ✅ Uploaded via clipboard paste');
+                return true;
+              }
+            } catch (_) {}
+
+            console.warn('    ❌ All upload strategies failed');
+            return false;
           }
 
           async function initGemini() {
@@ -204,7 +265,6 @@ jobs:
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.flushHeaders();
 
-            // Send keepalive ping every 15s to prevent connection drop
             const keepalive = setInterval(() => {
               try { res.write(': ping\n\n'); } catch (_) {}
             }, 15000);
@@ -217,10 +277,15 @@ jobs:
 
               if (image_base64) {
                 localImagePath = await saveImage(image_base64);
-                await uploadImage(localImagePath);
+                const uploaded = await uploadImage(localImagePath);
+                if (!uploaded) {
+                  send({ type: 'error', error: 'Failed to upload image to Gemini' });
+                  clearInterval(keepalive);
+                  res.end();
+                  return;
+                }
               }
 
-              // Count responses BEFORE submitting
               const prevCount = await getResponseCount();
               console.log(`📊 Previous response count: ${prevCount}`);
 
@@ -238,7 +303,6 @@ jobs:
               send({ type: 'start' });
               console.log(`📤 Prompt: ${prompt.substring(0, 50)}...`);
 
-              // Wait for NEW response to appear (longer timeout for complex prompts)
               const deadline = Date.now() + 180000;
               let newResponseAppeared = false;
 
@@ -250,21 +314,15 @@ jobs:
                   console.log(`✅ New response detected! Count: ${currentCount}`);
                   break;
                 }
-                // Also check if Gemini is loading/thinking
-                const loading = await isGeminiLoading();
-                if (loading) {
-                  console.log("⏳ Gemini is thinking...");
-                }
               }
 
               if (!newResponseAppeared) {
-                send({ type: 'error', error: 'New response did not appear in time' });
+                send({ type: 'error', error: 'No response from Gemini' });
                 clearInterval(keepalive);
                 res.end();
                 return;
               }
 
-              // Stream the NEW response only
               let lastSentText = '';
               let lastSeenText = '';
               let stableCount = 0;
