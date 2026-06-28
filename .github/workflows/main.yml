@@ -31,14 +31,14 @@ jobs:
           Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
           sleep 3
           echo "DISPLAY=:99" >> $GITHUB_ENV
-          echo "✅ Xvfb virtual display started on :99"
+          echo "✅ Xvfb started"
 
       - name: 📂 Download & Extract Google Profile
         env:
           DOWNLOAD_URL: ${{ secrets.PROFILE_DOWNLOAD_URL }}
         run: |
           if [ -z "$DOWNLOAD_URL" ]; then
-            echo "❌ Error: PROFILE_DOWNLOAD_URL secret is missing!"
+            echo "❌ PROFILE_DOWNLOAD_URL secret is missing!"
             exit 1
           fi
           wget -q -O gemini_profile.zip "$DOWNLOAD_URL" || { echo "❌ Failed to download profile"; exit 1; }
@@ -48,16 +48,15 @@ jobs:
           rm -f "./gemini_profile/Google Profile Lock"
           rm -rf ./gemini_profile/Default/Cache/*
           rm -f gemini_profile.zip
-          echo "✅ Google Profile Loaded Successfully!"
+          echo "✅ Google Profile Loaded!"
 
       - name: 📥 Install Cloudflare Tunnel
         run: |
-          echo "📥 Downloading cloudflared..."
           curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o cloudflared.deb
           sudo dpkg -i cloudflared.deb
           rm -f cloudflared.deb
           cloudflared --version
-          echo "✅ Cloudflare Tunnel Installed Successfully!"
+          echo "✅ cloudflared installed!"
 
       - name: 🛠️ Create Gemini API Server
         run: |
@@ -77,7 +76,7 @@ jobs:
           function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
           async function initGemini() {
-            console.log("⚡ Launching Chrome with persistent profile...");
+            console.log("⚡ Launching Chrome...");
             try {
               context = await chromium.launchPersistentContext('./gemini_profile', {
                 headless: false,
@@ -88,25 +87,15 @@ jobs:
                   '--disable-dev-shm-usage',
                   '--disable-blink-features=AutomationControlled',
                   '--disable-web-security',
-                  '--disable-features=IsolateOrigins,site-per-process',
                   '--window-size=1920,1080'
                 ],
                 viewport: { width: 1920, height: 1080 }
               });
-
               page = await context.newPage();
-
-              await page.setExtraHTTPHeaders({
-                'Accept-Language': 'en-US,en;q=0.9'
-              });
-
-              await page.goto('https://gemini.google.com/app', {
-                waitUntil: 'domcontentloaded',
-                timeout: 60000
-              });
-
+              await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+              await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 60000 });
               await sleep(3000);
-              console.log("✅ Gemini Web Interface Is Active!");
+              console.log("✅ Gemini Ready!");
             } catch (err) {
               console.error("❌ Failed to initialize Gemini:", err.message);
               process.exit(1);
@@ -128,38 +117,22 @@ jobs:
               try { await page.keyboard.press('Escape'); await sleep(300); } catch (_) {}
 
               if (image_base64) {
-                const base64Data = image_base64.replace(/^data:image\/\w+;base64,/, "");
-                const buffer = Buffer.from(base64Data, 'base64');
+                const buffer = Buffer.from(image_base64.replace(/^data:image\/\w+;base64,/, ""), 'base64');
                 localImagePath = path.join(os.tmpdir(), `upload_${Date.now()}.jpg`);
                 fs.writeFileSync(localImagePath, buffer);
-
                 const uploadBtnSelectors = [
                   'button[aria-label="Open upload file menu"]',
                   'button[aria-label="Upload file"]',
                   'button[aria-label="Add image"]',
                   'button[aria-label="Attach files"]',
                 ];
-
                 for (const sel of uploadBtnSelectors) {
-                  try {
-                    const btn = await page.$(sel);
-                    if (btn) {
-                      await btn.click();
-                      await sleep(500);
-                      break;
-                    }
-                  } catch (_) {}
+                  try { const btn = await page.$(sel); if (btn) { await btn.click(); await sleep(500); break; } } catch (_) {}
                 }
-
                 try {
                   const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
-                  if (fileInput) {
-                    await fileInput.setInputFiles(localImagePath);
-                    await sleep(2000);
-                  }
-                } catch (_) {
-                  console.log("⚠️ File input not found, skipping image upload");
-                }
+                  if (fileInput) { await fileInput.setInputFiles(localImagePath); await sleep(2000); }
+                } catch (_) {}
               }
 
               const inputSel = 'div.ql-editor[contenteditable="true"]';
@@ -169,20 +142,16 @@ jobs:
               await page.keyboard.press('Control+a');
               await page.keyboard.press('Delete');
               await sleep(300);
-
               await page.keyboard.insertText(prompt);
               await sleep(600);
               await page.keyboard.press('Enter');
-              console.log("📤 Prompt submitted, waiting for response...");
+              console.log("📤 Prompt submitted...");
 
               const deadline = Date.now() + 120000;
-              let finalResponseText = '';
-              let lastSeenText = '';
-              let stableCount = 0;
+              let finalResponseText = '', lastSeenText = '', stableCount = 0;
 
               while (Date.now() < deadline) {
                 await sleep(2000);
-
                 const latestText = await page.evaluate(() => {
                   const selectors = [
                     'div[id^="model-response-message-content"]',
@@ -199,25 +168,14 @@ jobs:
                 }).catch(() => '');
 
                 if (!latestText) continue;
-
                 if (latestText === lastSeenText) {
                   stableCount++;
-                  if (stableCount >= 3) {
-                    finalResponseText = latestText;
-                    console.log("✅ Response stable, returning...");
-                    break;
-                  }
-                } else {
-                  lastSeenText = latestText;
-                  stableCount = 0;
-                }
+                  if (stableCount >= 3) { finalResponseText = latestText; break; }
+                } else { lastSeenText = latestText; stableCount = 0; }
               }
 
               const result = finalResponseText || lastSeenText;
-              if (!result) {
-                return res.status(504).json({ success: false, error: "Timeout: No response from Gemini" });
-              }
-
+              if (!result) return res.status(504).json({ success: false, error: "Timeout: No response from Gemini" });
               res.json({ success: true, response: result });
 
             } catch (err) {
@@ -231,7 +189,6 @@ jobs:
           });
 
           process.on('SIGINT', async () => {
-            console.log("🛑 Shutting down...");
             if (context) await context.close().catch(() => {});
             process.exit(0);
           });
@@ -240,24 +197,23 @@ jobs:
             console.log(`🚀 Starting API Server on port ${PORT}...`);
             await initGemini();
             console.log(`🤖 API Server ready at http://127.0.0.1:${PORT}`);
-            console.log(`💡 Health check: http://127.0.0.1:${PORT}/health`);
-            console.log(`💡 API endpoint: POST http://127.0.0.1:${PORT}/api/gemini`);
           });
           SERVER_EOF
           echo "✅ API Server script created!"
 
-      - name: 🌐 Start Cloudflare Tunnel & Launch API Server
+      - name: 🌐 Start Tunnel & Publish URL to Repo
         env:
           DISPLAY: :99
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           echo "🌐 Starting Cloudflare Quick Tunnel..."
           cloudflared tunnel --url http://127.0.0.1:3000 \
             --no-autoupdate \
             --loglevel info \
             2>&1 | tee cloudflare.log &
-          CF_PID=$!
 
-          echo "⏳ Waiting for tunnel to establish..."
+          echo "⏳ Waiting for tunnel URL..."
           TUNNEL_URL=""
           for i in $(seq 1 30); do
             sleep 2
@@ -265,28 +221,36 @@ jobs:
             if [ -n "$TUNNEL_URL" ]; then
               break
             fi
-            echo "⏳ Attempt $i/30 - waiting for tunnel URL..."
+            echo "⏳ Attempt $i/30..."
           done
 
-          echo "=============================================="
-          if [ -n "$TUNNEL_URL" ]; then
-            echo "✅ CLOUDFLARE TUNNEL IS LIVE!"
-            echo ""
-            echo "🔗 PUBLIC URL : $TUNNEL_URL"
-            echo ""
-            echo "📡 API Endpoint : $TUNNEL_URL/api/gemini"
-            echo "❤️  Health Check : $TUNNEL_URL/health"
-            echo ""
-            echo "📬 Example Usage:"
-            echo "  curl -X POST $TUNNEL_URL/api/gemini \\"
-            echo "    -H 'Content-Type: application/json' \\"
-            echo "    -d '{\"prompt\": \"Hello Gemini!\"}'"
-          else
-            echo "❌ Failed to get tunnel URL. Check cloudflare.log"
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "❌ Failed to get tunnel URL"
             cat cloudflare.log
             exit 1
           fi
+
+          echo "✅ Tunnel URL: $TUNNEL_URL"
+
+          # ── Push URL to repo file so clients always know where to connect ──
+          git config user.email "bot@github-actions"
+          git config user.name "GitHub Actions Bot"
+
+          echo "$TUNNEL_URL" > tunnel_url.txt
+
+          git add tunnel_url.txt
+          git commit -m "🔗 Update tunnel URL: $TUNNEL_URL [skip ci]"
+          git push origin HEAD:main
+
+          echo "=============================================="
+          echo "✅ CLOUDFLARE TUNNEL IS LIVE!"
+          echo ""
+          echo "🔗 PUBLIC URL  : $TUNNEL_URL"
+          echo "📡 API Endpoint: $TUNNEL_URL/api/gemini"
+          echo "❤️  Health Check: $TUNNEL_URL/health"
+          echo ""
+          echo "📌 FIXED URL to get current tunnel:"
+          echo "   https://raw.githubusercontent.com/$REPO/main/tunnel_url.txt"
           echo "=============================================="
 
-          echo "🤖 Starting Gemini API Server..."
           node api_server.mjs
