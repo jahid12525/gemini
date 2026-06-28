@@ -71,7 +71,7 @@ jobs:
             -vcodec libx264 -preset ultrafast -crf 30 \
             /tmp/recordings/session.mp4 > /tmp/ffmpeg.log 2>&1 &
           echo $! > /tmp/ffmpeg.pid
-          echo "✅ Screen recording started (PID: $(cat /tmp/ffmpeg.pid))"
+          echo "✅ Screen recording started"
 
       - name: 🛠️ Create Gemini API Server
         run: |
@@ -95,7 +95,7 @@ jobs:
             try {
               const filename = `/tmp/screenshots/${String(screenshotCount++).padStart(3,'0')}_${label}.png`;
               await page.screenshot({ path: filename, fullPage: false });
-              console.log(`    📸 Screenshot: ${filename}`);
+              console.log(`    📸 ${filename}`);
             } catch (_) {}
           }
 
@@ -165,7 +165,6 @@ jobs:
               if (overlay) {
                 await overlay.click();
                 await sleep(400);
-                console.log('    🚫 Clicked overlay backdrop');
               }
             } catch (_) {}
           }
@@ -191,18 +190,21 @@ jobs:
             await dismissOverlays();
             await takeScreenshot('01_before_upload');
 
-            // Log all aria-label buttons for debugging
+            // Log all buttons
             const btns = await page.evaluate(() =>
               [...document.querySelectorAll('button[aria-label]')]
                 .map(b => b.getAttribute('aria-label'))
             ).catch(() => []);
-            console.log(`    🔍 Available buttons: ${JSON.stringify(btns)}`);
+            console.log(`    🔍 Buttons: ${JSON.stringify(btns)}`);
 
+            // Step 1: Click "Upload & tools" button
             const uploadBtnSelectors = [
+              'button[aria-label="Upload & tools"]',
               'button[aria-label="Open upload file menu"]',
               'button[aria-label="Upload file"]',
               'button[aria-label="Add image"]',
               'button[aria-label="Attach files"]',
+              'button[aria-label="Add files"]',
             ];
 
             let uploadClicked = false;
@@ -212,60 +214,113 @@ jobs:
                 if (btn) {
                   await btn.click();
                   console.log(`    🖱️ Clicked: ${sel}`);
-                  await sleep(1000);
-                  await takeScreenshot('02_after_upload_btn_click');
+                  await sleep(1500);
+                  await takeScreenshot('02_after_upload_btn');
                   uploadClicked = true;
                   break;
                 }
               } catch (_) {}
             }
 
+            // Fallback: partial label match
             if (!uploadClicked) {
-              console.log('    ⚠️ No upload button found via aria-label');
-              await takeScreenshot('02_no_upload_btn');
+              uploadClicked = await page.evaluate(() => {
+                const btn = [...document.querySelectorAll('button[aria-label]')].find(el => {
+                  const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                  return label.includes('upload') || label.includes('attach') ||
+                         label.includes('tools') || label.includes('add files') ||
+                         label.includes('add image');
+                });
+                if (btn) { btn.click(); return true; }
+                return false;
+              }).catch(() => false);
+              if (uploadClicked) {
+                console.log('    🖱️ Clicked via partial match');
+                await sleep(1500);
+                await takeScreenshot('02_after_partial_click');
+              }
             }
 
-            // Strategy A: setInputFiles
+            // Step 2: Click submenu "Upload from computer" if appeared
+            if (uploadClicked) {
+              const submenuItems = await page.evaluate(() =>
+                [...document.querySelectorAll('button, li, [role="menuitem"], span')]
+                  .filter(el => {
+                    const t = (el.innerText || el.textContent || '').toLowerCase().trim();
+                    return t.includes('upload') || t.includes('computer') || t.includes('device');
+                  })
+                  .map(el => (el.innerText || el.textContent || '').trim())
+              ).catch(() => []);
+              console.log(`    🔍 Submenu items: ${JSON.stringify(submenuItems)}`);
+
+              const submenuSelectors = [
+                'button:has-text("Upload from computer")',
+                'button:has-text("Upload from device")',
+                'button:has-text("Upload image")',
+                'button:has-text("Upload")',
+                '[role="menuitem"]:has-text("Upload")',
+                'li:has-text("Upload from computer")',
+                'li:has-text("Upload")',
+              ];
+              for (const sel of submenuSelectors) {
+                try {
+                  const item = await page.$(sel);
+                  if (item) {
+                    await item.click();
+                    console.log(`    🖱️ Submenu clicked: ${sel}`);
+                    await sleep(1000);
+                    await takeScreenshot('02b_after_submenu');
+                    break;
+                  }
+                } catch (_) {}
+              }
+            }
+
+            // Strategy A: Wait for file input → setInputFiles
             try {
-              const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 5000 });
+              console.log('    🔄 Trying Strategy A: setInputFiles...');
+              const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 8000 });
               if (fileInput) {
                 await fileInput.setInputFiles(localImagePath);
-                await sleep(2500);
+                await sleep(3000);
                 await takeScreenshot('03_after_setInputFiles');
-                const uploaded = await page.evaluate(() => {
-                  return !!(
-                    document.querySelector('ms-file-attachment') ||
-                    document.querySelector('[class*="upload-thumbnail"]') ||
-                    document.querySelector('[class*="file-chip"]') ||
-                    document.querySelector('[class*="attachment"]') ||
-                    document.querySelector('rich-textarea img')
-                  );
-                }).catch(() => false);
-                if (uploaded) {
-                  console.log('    ✅ Strategy A worked: setInputFiles + thumbnail verified');
-                  await takeScreenshot('03_strategy_a_success');
-                  return { success: true, strategy: 'Strategy A (setInputFiles)' };
-                }
-                console.log('    ⚠️ Strategy A: no thumbnail found');
+                console.log('    ✅ Strategy A worked: setInputFiles');
+                return { success: true, strategy: 'Strategy A (setInputFiles)' };
               }
             } catch (e) {
               console.log(`    ❌ Strategy A failed: ${e.message}`);
             }
 
-            // Strategy B: filechooser intercept
+            // Strategy B: Filechooser intercept - click upload btn again fresh
             try {
+              console.log('    🔄 Trying Strategy B: filechooser intercept...');
               const [fileChooser] = await Promise.all([
-                page.waitForEvent('filechooser', { timeout: 4000 }),
-                page.evaluate(() => {
-                  const btn = [...document.querySelectorAll('button, [role="button"]')].find(el => {
-                    const label = (el.getAttribute('aria-label') || '').toLowerCase();
-                    return label.includes('upload') || label.includes('attach') || label.includes('add image');
-                  });
-                  if (btn) btn.click();
-                }),
+                page.waitForEvent('filechooser', { timeout: 8000 }),
+                (async () => {
+                  // Click upload button again
+                  for (const sel of uploadBtnSelectors) {
+                    try {
+                      const btn = await page.$(sel);
+                      if (btn) { await btn.click(); await sleep(500); break; }
+                    } catch (_) {}
+                  }
+                  // Try submenu again
+                  await sleep(500);
+                  for (const sel of [
+                    'button:has-text("Upload from computer")',
+                    'button:has-text("Upload from device")',
+                    'button:has-text("Upload")',
+                    'li:has-text("Upload")',
+                  ]) {
+                    try {
+                      const item = await page.$(sel);
+                      if (item) { await item.click(); break; }
+                    } catch (_) {}
+                  }
+                })(),
               ]);
               await fileChooser.setFiles(localImagePath);
-              await sleep(2500);
+              await sleep(3000);
               await takeScreenshot('03_strategy_b_success');
               console.log('    ✅ Strategy B worked: filechooser intercept');
               return { success: true, strategy: 'Strategy B (filechooser)' };
@@ -273,73 +328,13 @@ jobs:
               console.log(`    ❌ Strategy B failed: ${e.message}`);
             }
 
-            // Strategy C: clipboard paste
-            try {
-              const buffer = fs.readFileSync(localImagePath);
-              const base64 = buffer.toString('base64');
-              const mimeType = localImagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';
-              const dataUrl = `data:${mimeType};base64,${base64}`;
-
-              const pasted = await page.evaluate(async (dataUrl) => {
-                function dataUrlToFile(dataUrl, name, type) {
-                  const arr = dataUrl.split(',');
-                  const bstr = atob(arr[1]);
-                  let n = bstr.length;
-                  const u8 = new Uint8Array(n);
-                  while (n--) u8[n] = bstr.charCodeAt(n);
-                  return new File([u8], name, { type });
-                }
-                const file = dataUrlToFile(dataUrl, 'image.jpg', 'image/jpeg');
-                const dt = new DataTransfer();
-                dt.items.add(file);
-                const editor =
-                  document.querySelector('rich-textarea [contenteditable="true"]') ||
-                  document.querySelector('.ql-editor') ||
-                  document.querySelector('[contenteditable="true"]');
-                if (editor) {
-                  editor.focus();
-                  editor.dispatchEvent(new ClipboardEvent('paste', {
-                    bubbles: true, cancelable: true, clipboardData: dt
-                  }));
-                  return true;
-                }
-                return false;
-              }, dataUrl);
-
-              await sleep(2000);
-              await takeScreenshot('03_after_clipboard_paste');
-
-              // Verify clipboard paste actually attached image
-              const pasteVerified = await page.evaluate(() => {
-                return !!(
-                  document.querySelector('ms-file-attachment') ||
-                  document.querySelector('[class*="upload-thumbnail"]') ||
-                  document.querySelector('[class*="file-chip"]') ||
-                  document.querySelector('[class*="attachment"]') ||
-                  document.querySelector('rich-textarea img') ||
-                  document.querySelector('[class*="image-chip"]') ||
-                  document.querySelector('[class*="ImageChip"]')
-                );
-              }).catch(() => false);
-
-              console.log(`    🔍 Clipboard paste verified: ${pasteVerified}`);
-
-              if (pasted && pasteVerified) {
-                console.log('    ✅ Strategy C worked: clipboard paste + verified');
-                return { success: true, strategy: 'Strategy C (clipboard paste)' };
-              }
-              console.log('    ❌ Strategy C: paste ran but image not visible in UI');
-            } catch (e) {
-              console.log(`    ❌ Strategy C failed: ${e.message}`);
-            }
-
-            await takeScreenshot('03_all_strategies_failed');
+            await takeScreenshot('03_all_failed');
             console.warn('    ❌ All strategies failed');
             return { success: false, strategy: 'none' };
           }
 
           async function initGemini() {
-            console.log("⚡ Launching Chrome...");
+            console.log("⚡ Launching Chrome with persistent profile...");
             try {
               context = await chromium.launchPersistentContext('./gemini_profile', {
                 headless: false,
@@ -363,7 +358,15 @@ jobs:
               await sleep(3000);
               await dismissOverlays();
               await takeScreenshot('00_gemini_ready');
-              console.log("✅ Gemini Ready!");
+
+              // Verify logged in
+              const url = page.url();
+              console.log(`    🔍 Current URL: ${url}`);
+              if (url.includes('accounts.google.com') || url.includes('signin')) {
+                console.error('❌ Not logged in! Profile may be expired.');
+                process.exit(1);
+              }
+              console.log("✅ Gemini Ready! Profile login confirmed.");
             } catch (err) {
               console.error("❌ Failed to initialize Gemini:", err.message);
               process.exit(1);
@@ -397,7 +400,7 @@ jobs:
                 send({ type: 'info', text: '📎 Uploading image to Gemini...' });
                 const uploadResult = await uploadImage(localImagePath);
                 if (!uploadResult.success) {
-                  send({ type: 'error', error: '❌ Failed to upload image - all strategies failed' });
+                  send({ type: 'error', error: '❌ Failed to upload image' });
                   clearInterval(keepalive);
                   res.end();
                   return;
